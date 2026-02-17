@@ -1,0 +1,63 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Linting
+.ruff_cache/
+.mypy_cache/
+
+# Data files (downloaded / generated)
+data/cache/
+data/output/
+data/*.csv
+data/*.zip
+data/*.parquet
+!data/.gitkeep
+
+# Dashboard data (generated)
+dashboard/data/
+dashboard/node_modules/
+dashboard/dist/
+dashboard/public/dsfr/
+
+# Temporary files
+.tmp/
+
+# Claude Code
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# uv
+uv.lock
+
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+*.ipynb

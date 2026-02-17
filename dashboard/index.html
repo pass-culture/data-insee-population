@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="fr" data-fr-scheme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Population</title>
+    <link rel="stylesheet" href="/css/dashboard.css" />
+  </head>
+  <body>
+    <!-- DSFR Header -->
+    <header role="banner" class="fr-header">
+      <div class="fr-header__body">
+        <div class="fr-container">
+          <div class="fr-header__body-row">
+            <div class="fr-header__brand fr-enlarge-link">
+              <div class="fr-header__brand-top">
+                <div class="fr-header__navbar">
+                  <button
+                    class="fr-btn--menu fr-btn"
+                    data-fr-opened="false"
+                    aria-controls="modal-nav"
+                    aria-haspopup="menu"
+                    id="btn-menu"
+                    title="Menu"
+                  >
+                    Menu
+                  </button>
+                </div>
+              </div>
+              <div class="fr-header__service">
+                <a href="#overview" title="Accueil — Population">
+                  <p class="fr-header__service-title">Population</p>
+                </a>
+                <p class="fr-header__service-tagline">Données démographiques par département, EPCI et IRIS</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <!-- Navigation -->
+      <div class="fr-header__menu fr-modal" id="modal-nav" aria-labelledby="btn-menu">
+        <div class="fr-container">
+          <button class="fr-btn--close fr-btn" aria-controls="modal-nav" title="Fermer">Fermer</button>
+          <div class="fr-header__menu-links"></div>
+          <nav class="fr-nav" id="main-nav" role="navigation" aria-label="Menu principal">
+            <ul class="fr-nav__list">
+              <li class="fr-nav__item">
+                <a class="fr-nav__link" href="#overview" data-page="overview" aria-current="page">Vue d'ensemble</a>
+              </li>
+              <li class="fr-nav__item">
+                <a class="fr-nav__link" href="#pyramid" data-page="pyramid">Pyramide des âges</a>
+              </li>
+              <li class="fr-nav__item">
+                <a class="fr-nav__link" href="#geography" data-page="geography">Géographie</a>
+              </li>
+              <li class="fr-nav__item">
+                <a class="fr-nav__link" href="#temporal" data-page="temporal">Temporel</a>
+              </li>
+              <li class="fr-nav__item">
+                <a class="fr-nav__link" href="#dom-tom" data-page="dom-tom">DOM-TOM</a>
+              </li>
+<li class="fr-nav__item">
+                <a class="fr-nav__link" href="#precision" data-page="precision">Précision & Mobilité</a>
+              </li>
+            </ul>
+          </nav>
+        </div>
+      </div>
+    </header>
+
+    <!-- Filters bar -->
+    <div class="fr-container dashboard-filters" id="global-filters"></div>
+
+    <!-- Main content -->
+    <main id="main">
+      <div class="fr-container" id="page-content">
+        <div id="loading-init" class="dashboard-loading-init">
+          <div class="fr-container">
+            <p class="fr-h4">Initialisation de DuckDB…</p>
+            <p class="fr-text--sm fr-text--alt">Chargement des données de population</p>
+            <progress class="fr-progress" style="width:300px;max-width:100%"></progress>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- DSFR Footer -->
+    <footer class="fr-footer" role="contentinfo" id="footer">
+      <div class="fr-container">
+        <div class="fr-footer__body">
+          <div class="fr-footer__content">
+          </div>
+        </div>
+      </div>
+    </footer>
+
+    <script type="module" src="/js/app.js"></script>
+  </body>
+</html>

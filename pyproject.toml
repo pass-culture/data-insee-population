@@ -1,0 +1,79 @@
+[project]
+name = "passculture-data-insee-population"
+version = "0.1.0"
+description = "INSEE population data for pass Culture data platform"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pandas>=2.0.0",
+    "pyarrow>=14.0.0",
+    "google-cloud-bigquery>=3.0.0",
+    "google-auth-oauthlib>=1.0.0",
+    "db-dtypes>=1.0.0",
+    "typer>=0.9.0",
+    "requests>=2.28.0",
+    "rich>=13.0.0",
+    "duckdb>=1.4.4",
+    "openpyxl>=3.1.5",
+]
+
+[project.scripts]
+insee-population = "passculture.data.insee_population.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/passculture"]
+
+[dependency-groups]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "ruff>=0.5.0",
+    "geopandas>=1.0.0",
+    "folium>=0.17.0",
+    "matplotlib>=3.7.0",
+    "seaborn>=0.13.0",
+    "contextily>=1.6.0",
+    "mapclassify>=2.6.0",
+    "plotly>=5.0.0",
+    "ipykernel>=6.0.0",
+    "jupyter>=1.0.0",
+]
+
+[tool.ruff]
+target-version = "py310"
+src = ["src"]
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle
+    "W",      # pycodestyle
+    "F",      # Pyflakes
+    "B",      # flake8-bugbear
+    "C4",     # flake8-comprehensions
+    "I",      # isort
+    "SIM",    # flake8-simplify
+    "UP",     # pyupgrade
+    "RUF",    # Ruff-specific rules
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.pycodestyle]
+max-doc-length = 100
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.lint.isort]
+known-first-party = ["passculture"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --tb=short"
+markers = ["integration: requires downloaded INSEE data (use --run-integration)"]

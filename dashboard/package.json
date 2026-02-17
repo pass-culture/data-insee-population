@@ -1,0 +1,21 @@
+{
+  "name": "dashboard",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@duckdb/duckdb-wasm": "^1.33.1-dev18.0",
+    "@gouvfr/dsfr": "^1.14.3",
+    "@gouvfr/dsfr-chart": "^2.0.4",
+    "@observablehq/plot": "^0.6.17",
+    "d3-scale": "^4.0.2",
+    "d3-scale-chromatic": "^3.1.0",
+    "leaflet": "^1.9.4",
+    "vite": "^7.3.1"
+  }
+}
