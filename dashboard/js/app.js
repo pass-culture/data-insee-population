@@ -10,19 +10,19 @@ import { initDB } from "./db.js";
 import { renderFilters, onFilterChange, setFilterSilent } from "./components/filters.js";
 import { renderOverview } from "./pages/overview.js";
 import { renderPyramid } from "./pages/pyramid.js";
-import { renderGeography } from "./pages/geography.js";
 import { renderTemporal } from "./pages/temporal.js";
 import { renderDomTom } from "./pages/dom-tom.js";
 import { renderPrecision } from "./pages/precision.js";
+import { renderExplorer } from "./pages/explorer.js";
 import { renderDepartmentDetail } from "./pages/department-detail.js";
 
 const pages = {
   overview: renderOverview,
   pyramid: renderPyramid,
-  geography: renderGeography,
   temporal: renderTemporal,
   "dom-tom": renderDomTom,
   precision: renderPrecision,
+  explorer: renderExplorer,
 };
 
 let currentPage = null;
@@ -51,6 +51,9 @@ async function navigate() {
   const { page, params } = parseHash();
   const content = document.getElementById("page-content");
 
+  // Full-width layout for explorer page (escape fr-container max-width)
+  content.classList.toggle("explorer-fullwidth", page === "explorer");
+
   if (currentPage === location.hash) return;
   currentPage = location.hash;
 
@@ -60,7 +63,7 @@ async function navigate() {
   // Hide filters on pages that don't use them
   const filtersEl = document.getElementById("global-filters");
   if (filtersEl) {
-    filtersEl.style.display = page === "precision" ? "none" : "";
+    filtersEl.style.display = (page === "precision" || page === "explorer") ? "none" : "";
   }
 
   if (page === "department") {
@@ -84,8 +87,10 @@ async function init() {
     // Render global filters
     await renderFilters(document.getElementById("global-filters"));
 
-    // On filter change, re-render current page
+    // On filter change, re-render current page (explorer handles its own updates)
     onFilterChange(() => {
+      const { page } = parseHash();
+      if (page === "explorer") return;
       currentPage = null; // force re-render
       navigate();
     });

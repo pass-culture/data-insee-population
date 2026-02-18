@@ -46,10 +46,6 @@ export async function renderPyramid(container) {
   const total = totalMale + totalFemale;
   const overallRatio = totalFemale > 0 ? ((totalMale / totalFemale) * 100).toFixed(2) : "-";
 
-  // Prepare sex ratio chart data for dsfr-chart
-  const ratioAges = filteredRatio.map((d) => String(d.age));
-  const ratioValues = filteredRatio.map((d) => d.sex_ratio);
-
   container.innerHTML = `
     <div class="page-header">
       <h2 class="fr-h3">Pyramide des âges — ${year} (${ageMin}-${ageMax} ans)</h2>
@@ -80,19 +76,9 @@ export async function renderPyramid(container) {
         <h3>Pyramide de population</h3>
         <div class="chart-container" id="chart-pyramid"></div>
       </div>
-      <div class="card">
-        <h3>Ratio hommes/femmes par âge</h3>
-        <div class="chart-container">
-          <bar-chart
-            x='${JSON.stringify([ratioAges])}'
-            y='${JSON.stringify([ratioValues])}'
-            name='["Ratio H/F"]'
-            unit-tooltip="pour 100 femmes">
-          </bar-chart>
-        </div>
-      </div>
-      <div class="card">
-        <h3>Population par âge et sexe</h3>
+      <div class="card card-full">
+        <h3>Population par année de naissance</h3>
+        <p class="fr-text--sm fr-text--alt" style="margin-top:-0.5rem">\u00c2ge r\u00e9volu au 1er janvier ${year}</p>
         <div id="table-pyramid"></div>
       </div>
     </div>
@@ -157,9 +143,20 @@ export async function renderPyramid(container) {
     );
   });
 
-  // Data table
-  renderDataTable(document.getElementById("table-pyramid"), filteredRatio, [
-    { key: "age", label: "Age", numeric: true },
+  // Data table — birth year, age, population breakdown + ratio
+  // Âge révolu au 1er janvier: someone aged A was born in year Y-A-1 (predominantly)
+  const tableData = filteredRatio.map((d) => ({
+    birth_year: year - d.age - 1,
+    age: d.age,
+    total: (d.male_pop || 0) + (d.female_pop || 0),
+    male_pop: d.male_pop,
+    female_pop: d.female_pop,
+    sex_ratio: d.sex_ratio,
+  }));
+  renderDataTable(document.getElementById("table-pyramid"), tableData, [
+    { key: "birth_year", label: "Naissance", numeric: true },
+    { key: "age", label: "Âge", numeric: true },
+    { key: "total", label: "Population", numeric: true, format: fmt },
     { key: "male_pop", label: "Hommes", numeric: true, format: fmt },
     { key: "female_pop", label: "Femmes", numeric: true, format: fmt },
     { key: "sex_ratio", label: "Ratio H/F", numeric: true, format: (v) => v?.toFixed(1) },

@@ -3,6 +3,7 @@
 __all__ = [
     "CREATE_CORRECTED_GEO_RATIOS_EPCI",
     "CREATE_CORRECTED_GEO_RATIOS_IRIS",
+    "CREATE_MOBILITY_WEIGHTS",
     "CREATE_STUDENT_FLOWS_EPCI",
     "CREATE_STUDENT_FLOWS_IRIS",
     "RENAME_GEO_RATIOS_EPCI_TO_BASE",
@@ -12,6 +13,59 @@ __all__ = [
 RENAME_GEO_RATIOS_EPCI_TO_BASE = (
     "ALTER TABLE geo_ratios_epci RENAME TO geo_ratios_epci_base"
 )
+
+# Compute per-department inter-departmental student mobility rate.
+# For each department, mobility_rate = fraction of students studying
+# in a different department. blend_weight = min(mobility_rate, cap),
+# with a fallback default for departments not in MOBSCO.
+CREATE_MOBILITY_WEIGHTS = """
+CREATE OR REPLACE TABLE mobility_weights AS
+WITH mobsco_raw AS (
+    SELECT
+        CASE
+            WHEN LEFT(TRIM(COMMUNE), 2) = '97' THEN LEFT(TRIM(COMMUNE), 3)
+            ELSE LEFT(TRIM(COMMUNE), 2)
+        END AS residence_dept,
+        CASE
+            WHEN LEFT(TRIM(DCETUF), 2) = '97' THEN LEFT(TRIM(DCETUF), 3)
+            ELSE LEFT(TRIM(DCETUF), 2)
+        END AS study_dept,
+        CAST(IPONDI AS DOUBLE) AS weight
+    FROM read_parquet('{mobsco_path}')
+    WHERE TRIM(AGEREV10) = '18'
+),
+dept_totals AS (
+    SELECT
+        residence_dept AS department_code,
+        SUM(weight) AS total_students,
+        SUM(CASE WHEN residence_dept <> study_dept THEN weight ELSE 0 END)
+            AS inter_dept_students
+    FROM mobsco_raw
+    GROUP BY residence_dept
+),
+rates AS (
+    SELECT
+        department_code,
+        CASE
+            WHEN total_students > 0
+            THEN inter_dept_students / total_students
+            ELSE 0
+        END AS mobility_rate
+    FROM dept_totals
+)
+SELECT
+    department_code,
+    mobility_rate,
+    LEAST(mobility_rate, {blend_cap}) AS blend_weight
+FROM rates
+UNION ALL
+SELECT
+    d.department_code,
+    {blend_default} AS mobility_rate,
+    {blend_default} AS blend_weight
+FROM (SELECT DISTINCT department_code FROM population) d
+WHERE d.department_code NOT IN (SELECT department_code FROM rates)
+"""
 
 # Compute study-destination EPCI distribution from MOBSCO parquet.
 # AGEREV10='18' covers ages 18-24. We join DCETUF (study commune) to
@@ -65,6 +119,7 @@ JOIN dept_totals dt
 
 # Blend study-based geo ratios into census-based ones for student age bands.
 # For bands 15_19 and 20_24: corrected = (1-w)*base + w*study, renormalized.
+# Uses per-department blend weights from the mobility_weights table.
 # Other bands: unchanged from base.
 CREATE_CORRECTED_GEO_RATIOS_EPCI = """
 CREATE OR REPLACE TABLE geo_ratios_epci AS
@@ -84,19 +139,20 @@ non_student AS (
     FROM geo_ratios_epci_base b
     WHERE b.age_band NOT IN (SELECT age_band FROM student_bands)
 ),
--- Blended ratios for student bands
+-- Blended ratios for student bands (per-department blend weights)
 blended_raw AS (
     SELECT
         COALESCE(b.department_code, sf.department_code) AS department_code,
         COALESCE(b.epci_code, sf.epci_code) AS epci_code,
         sb.age_band,
         COALESCE(b.sex, sf.sex) AS sex,
-        (1.0 - {blend_weight}) * COALESCE(b.geo_ratio, 0)
-            + {blend_weight} * COALESCE(sf.study_geo_ratio, 0) AS raw_ratio
+        (1.0 - mw.blend_weight) * COALESCE(b.geo_ratio, 0)
+            + mw.blend_weight * COALESCE(sf.study_geo_ratio, 0) AS raw_ratio
     FROM student_bands sb
     CROSS JOIN (
         SELECT DISTINCT department_code, sex FROM geo_ratios_epci_base
     ) ds
+    JOIN mobility_weights mw ON mw.department_code = ds.department_code
     LEFT JOIN geo_ratios_epci_base b
         ON b.department_code = ds.department_code
         AND b.sex = ds.sex
@@ -211,6 +267,7 @@ JOIN dept_totals dt
 
 # Blend study-based geo ratios into census-based ones for student age bands (IRIS).
 # For bands 15_19 and 20_24: corrected = (1-w)*base + w*study, renormalized.
+# Uses per-department blend weights from the mobility_weights table.
 # Other bands: unchanged from base.
 CREATE_CORRECTED_GEO_RATIOS_IRIS = """
 CREATE OR REPLACE TABLE geo_ratios_iris AS
@@ -232,12 +289,13 @@ blended_raw AS (
         COALESCE(b.epci_code, sf.epci_code) AS epci_code,
         sb.age_band,
         COALESCE(b.sex, sf.sex) AS sex,
-        (1.0 - {blend_weight}) * COALESCE(b.geo_ratio, 0)
-            + {blend_weight} * COALESCE(sf.study_geo_ratio, 0) AS raw_ratio
+        (1.0 - mw.blend_weight) * COALESCE(b.geo_ratio, 0)
+            + mw.blend_weight * COALESCE(sf.study_geo_ratio, 0) AS raw_ratio
     FROM student_bands sb
     CROSS JOIN (
         SELECT DISTINCT department_code, sex FROM geo_ratios_iris_base
     ) ds
+    JOIN mobility_weights mw ON mw.department_code = ds.department_code
     LEFT JOIN geo_ratios_iris_base b
         ON b.department_code = ds.department_code
         AND b.sex = ds.sex

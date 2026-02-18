@@ -7,7 +7,6 @@ __all__ = [
     "REGISTER_COMMUNE_EPCI",
     "REGISTER_MONTHLY_BIRTHS",
     "REGISTER_QUINQUENNAL",
-    "REPLACE_QUINQUENNAL_WITH_CENSUS",
 ]
 
 CREATE_BASE_TABLE = """
@@ -59,44 +58,3 @@ REGISTER_QUINQUENNAL = (
 REGISTER_MONTHLY_BIRTHS = (
     "CREATE OR REPLACE TABLE monthly_births AS SELECT * FROM monthly_births_df"
 )
-
-REPLACE_QUINQUENNAL_WITH_CENSUS = """
-CREATE OR REPLACE TABLE quinquennal AS
-WITH age_band_map AS (
-    SELECT age, CASE {age_band_cases} END AS age_band
-    FROM generate_series(0, 120) AS t(age)
-),
-original AS (
-    SELECT * FROM quinquennal
-),
-band_ranges AS (
-    SELECT
-        q.year, q.department_code, q.sex, q.age_band, q.population,
-        MIN(abm.age) + ({census_year} - q.year) AS min_census_age,
-        MAX(abm.age) + ({census_year} - q.year) AS max_census_age
-    FROM original q
-    JOIN age_band_map abm ON abm.age_band = q.age_band
-    GROUP BY q.year, q.department_code, q.sex, q.age_band, q.population
-),
-census_derived AS (
-    SELECT
-        br.year, br.department_code, br.sex, br.age_band,
-        SUM(p.population) AS census_pop
-    FROM band_ranges br
-    JOIN population p
-        ON p.department_code = br.department_code
-        AND p.sex = br.sex
-        AND p.age BETWEEN br.min_census_age AND br.max_census_age
-    WHERE br.min_census_age >= 0 AND br.max_census_age <= 120
-    GROUP BY br.year, br.department_code, br.sex, br.age_band
-)
-SELECT
-    br.year, br.department_code, br.sex, br.age_band,
-    COALESCE(cd.census_pop, br.population) AS population
-FROM band_ranges br
-LEFT JOIN census_derived cd
-    ON br.year = cd.year
-    AND br.department_code = cd.department_code
-    AND br.sex = cd.sex
-    AND br.age_band = cd.age_band
-"""

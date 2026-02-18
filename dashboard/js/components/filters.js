@@ -5,6 +5,8 @@
 import { query } from "../db.js";
 import { availableYears, availableDepartments, ageRange } from "../queries.js";
 
+let cachedYears = [];
+
 const state = {
   year: null, // will be set to max year on init
   department: "all",
@@ -28,6 +30,10 @@ export function getFilters() {
   };
 }
 
+export function getFilterMeta() {
+  return { years: cachedYears, dbAgeMin: state.dbAgeMin, dbAgeMax: state.dbAgeMax };
+}
+
 export function setFilter(key, value) {
   if (state[key] === value) return;
   state[key] = value;
@@ -44,6 +50,10 @@ export function setFilterSilent(key, value) {
 
 export function onFilterChange(fn) {
   state._listeners.push(fn);
+  return () => {
+    const idx = state._listeners.indexOf(fn);
+    if (idx !== -1) state._listeners.splice(idx, 1);
+  };
 }
 
 /**
@@ -65,9 +75,12 @@ export async function renderFilters(container) {
   if (state.ageMin == null) state.ageMin = dbMin;
   if (state.ageMax == null) state.ageMax = dbMax;
 
+  // Cache years for getFilterMeta()
+  cachedYears = years.map((r) => r.year).sort((a, b) => a - b);
+
   // Default to latest year
   if (!state.year) {
-    state.year = Math.max(...years.map((r) => r.year));
+    state.year = Math.max(...cachedYears);
   }
 
   const ageOptions = Array.from({ length: dbMax - dbMin + 1 }, (_, i) => dbMin + i);

@@ -35,11 +35,22 @@ EPCI_GEOJSON_URL = (
     "georef-france-epci@public/exports/geojson"
     "?limit=-1"
 )
+# Opendatasoft cantons (per-department)
+CANTON_GEOJSON_API = (
+    "https://data.opendatasoft.com/api/explore/v2.1/catalog/datasets/"
+    "georef-france-canton@public/exports/geojson"
+    "?refine=dep_code%3A{dept}"
+    "&limit=-1"
+)
 
 
 def copy_parquet():
     """Copy department and EPCI parquet files."""
-    for name in ["population_department.parquet", "population_epci.parquet"]:
+    for name in [
+        "population_department.parquet",
+        "population_epci.parquet",
+        "population_canton.parquet",
+    ]:
         src = DATA_INPUT / name
         dst = DATA_OUTPUT / name
         if not src.exists():
@@ -75,6 +86,41 @@ def split_iris():
             f"""
             COPY (
                 SELECT * FROM read_parquet('{iris_file}')
+                WHERE department_code = '{dept_code}'
+            ) TO '{out_path}' (FORMAT PARQUET)
+            """
+        )
+        size = out_path.stat().st_size / 1e6
+        print(f"    {dept_code}: {size:.1f} MB")
+
+    conn.close()
+
+
+def split_canton():
+    """Split canton parquet by department."""
+    canton_file = DATA_INPUT / "population_canton.parquet"
+    if not canton_file.exists():
+        print("  SKIP population_canton.parquet (not found)")
+        return
+
+    canton_dir = DATA_OUTPUT / "canton"
+    canton_dir.mkdir(parents=True, exist_ok=True)
+
+    conn = duckdb.connect()
+
+    depts = conn.execute(
+        "SELECT DISTINCT department_code "
+        f"FROM read_parquet('{canton_file}') ORDER BY department_code"
+    ).fetchall()
+
+    print(f"  Splitting canton into {len(depts)} department files...")
+
+    for (dept_code,) in depts:
+        out_path = canton_dir / f"population_canton_{dept_code}.parquet"
+        conn.execute(
+            f"""
+            COPY (
+                SELECT * FROM read_parquet('{canton_file}')
                 WHERE department_code = '{dept_code}'
             ) TO '{out_path}' (FORMAT PARQUET)
             """
@@ -152,6 +198,39 @@ def download_iris_geojson():
             continue
 
         url = IRIS_GEOJSON_API.format(dept=dept_code)
+        try:
+            resp = requests.get(url, timeout=120)
+            resp.raise_for_status()
+            out_path.write_bytes(resp.content)
+            size = out_path.stat().st_size / 1e6
+            print(f"    {dept_code}: {size:.1f} MB")
+        except Exception as e:
+            print(f"    {dept_code}: FAILED ({e})")
+
+
+def download_canton_geojson():
+    """Download per-department canton boundaries from Opendatasoft."""
+    canton_dir = DATA_OUTPUT / "geo" / "canton"
+    canton_dir.mkdir(parents=True, exist_ok=True)
+
+    canton_file = DATA_INPUT / "population_canton.parquet"
+    if not canton_file.exists():
+        print("  SKIP canton GeoJSON (no canton parquet)")
+        return
+
+    conn = duckdb.connect()
+    depts = conn.execute(
+        "SELECT DISTINCT department_code "
+        f"FROM read_parquet('{canton_file}') ORDER BY department_code"
+    ).fetchall()
+    conn.close()
+
+    for (dept_code,) in depts:
+        out_path = canton_dir / f"canton_{dept_code}.geojson"
+        if out_path.exists():
+            continue
+
+        url = CANTON_GEOJSON_API.format(dept=dept_code)
         try:
             resp = requests.get(url, timeout=120)
             resp.raise_for_status()
@@ -331,6 +410,9 @@ def main():
     print("\n=== Step 2: Split IRIS by department ===")
     split_iris()
 
+    print("\n=== Step 2b: Split canton by department ===")
+    split_canton()
+
     print("\n=== Step 3: Download department GeoJSON ===")
     download_dept_geojson()
 
@@ -339,6 +421,9 @@ def main():
 
     print("\n=== Step 5: Download IRIS GeoJSON (per-department) ===")
     download_iris_geojson()
+
+    print("\n=== Step 5b: Download canton GeoJSON (per-department) ===")
+    download_canton_geojson()
 
     print("\n=== Step 6: Compute bias comparison ===")
     compute_bias_comparison()

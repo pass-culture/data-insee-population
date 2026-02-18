@@ -1,6 +1,7 @@
 """Multi-year projected population tables (department, EPCI, IRIS)."""
 
 __all__ = [
+    "CREATE_PROJECTED_CANTON",
     "CREATE_PROJECTED_DEPARTMENT",
     "CREATE_PROJECTED_EPCI",
     "CREATE_PROJECTED_IRIS",
@@ -8,6 +9,7 @@ __all__ = [
 ]
 
 # Project department-level population: quinquennal * age_ratio * month_ratio
+# Includes confidence intervals based on census offset.
 CREATE_PROJECTED_DEPARTMENT = """
 CREATE OR REPLACE TABLE population_department AS
 WITH base AS (
@@ -66,13 +68,29 @@ SELECT
     age,
     sex,
     'exact' AS geo_precision,
-    population
+    population,
+    CASE
+        WHEN ABS(year - {census_year}) <= 1 THEN {ci_base_near}
+        WHEN ABS(year - {census_year}) <= 3 THEN {ci_base_mid}
+        ELSE {ci_per_year} * ABS(year - {census_year})
+    END AS confidence_pct,
+    population * (1.0 - CASE
+        WHEN ABS(year - {census_year}) <= 1 THEN {ci_base_near}
+        WHEN ABS(year - {census_year}) <= 3 THEN {ci_base_mid}
+        ELSE {ci_per_year} * ABS(year - {census_year})
+    END) AS population_low,
+    population * (1.0 + CASE
+        WHEN ABS(year - {census_year}) <= 1 THEN {ci_base_near}
+        WHEN ABS(year - {census_year}) <= 3 THEN {ci_base_mid}
+        ELSE {ci_per_year} * ABS(year - {census_year})
+    END) AS population_high
 FROM base_with_fallback
 WHERE population > 0
 ORDER BY year, month, department_code, age, sex
 """
 
 # Project EPCI-level population: department projection * geo_ratio
+# EPCI adds extra geographic uncertainty to confidence intervals.
 CREATE_PROJECTED_EPCI = """
 CREATE OR REPLACE TABLE population_epci AS
 WITH age_band_map AS (
@@ -95,7 +113,12 @@ SELECT
     pd.age,
     pd.sex,
     'exact' AS geo_precision,
-    pd.population * gr.geo_ratio AS population
+    pd.population * gr.geo_ratio AS population,
+    pd.confidence_pct + {ci_extra_epci} AS confidence_pct,
+    pd.population * gr.geo_ratio * (1.0 - (pd.confidence_pct + {ci_extra_epci}))
+        AS population_low,
+    pd.population * gr.geo_ratio * (1.0 + (pd.confidence_pct + {ci_extra_epci}))
+        AS population_high
 FROM population_department pd
 JOIN age_band_map abm ON pd.age = abm.age
 JOIN geo_ratios_epci gr
@@ -106,7 +129,48 @@ WHERE pd.population * gr.geo_ratio > 0
 ORDER BY pd.year, pd.month, gr.epci_code, pd.age, pd.sex
 """
 
+# Project canton-level population: department projection * geo_ratio
+# Canton adds geographic uncertainty between EPCI and IRIS levels.
+CREATE_PROJECTED_CANTON = """
+CREATE OR REPLACE TABLE population_canton AS
+WITH age_band_map AS (
+    SELECT
+        age,
+        CASE
+            {age_band_cases}
+        END AS age_band
+    FROM generate_series(0, 120) AS t(age)
+)
+SELECT
+    pd.year,
+    pd.month,
+    pd.current_date,
+    pd.born_date,
+    pd.decimal_age,
+    pd.department_code,
+    gr.region_code,
+    gr.canton_code,
+    pd.age,
+    pd.sex,
+    'exact' AS geo_precision,
+    pd.population * gr.geo_ratio AS population,
+    pd.confidence_pct + {ci_extra_canton} AS confidence_pct,
+    pd.population * gr.geo_ratio * (1.0 - (pd.confidence_pct + {ci_extra_canton}))
+        AS population_low,
+    pd.population * gr.geo_ratio * (1.0 + (pd.confidence_pct + {ci_extra_canton}))
+        AS population_high
+FROM population_department pd
+JOIN age_band_map abm ON pd.age = abm.age
+JOIN geo_ratios_canton gr
+    ON pd.department_code = gr.department_code
+    AND abm.age_band = gr.age_band
+    AND pd.sex = gr.sex
+WHERE pd.population * gr.geo_ratio > 0
+ORDER BY pd.year, pd.month, gr.canton_code, pd.age, pd.sex
+"""
+
 # Project IRIS-level population: department projection * geo_ratio
+# IRIS adds the largest geographic uncertainty to confidence intervals.
 CREATE_PROJECTED_IRIS = """
 CREATE OR REPLACE TABLE population_iris AS
 WITH age_band_map AS (
@@ -131,7 +195,12 @@ SELECT
     pd.age,
     pd.sex,
     'exact' AS geo_precision,
-    pd.population * gr.geo_ratio AS population
+    pd.population * gr.geo_ratio AS population,
+    pd.confidence_pct + {ci_extra_iris} AS confidence_pct,
+    pd.population * gr.geo_ratio * (1.0 - (pd.confidence_pct + {ci_extra_iris}))
+        AS population_low,
+    pd.population * gr.geo_ratio * (1.0 + (pd.confidence_pct + {ci_extra_iris}))
+        AS population_high
 FROM population_department pd
 JOIN age_band_map abm ON pd.age = abm.age
 JOIN geo_ratios_iris gr
@@ -146,6 +215,7 @@ ORDER BY pd.year, pd.month, gr.iris_code, pd.age, pd.sex
 # from the last TREND_YEARS of the *projected* output.
 # This ensures the growth rate reflects the full pipeline (quinquennal *
 # age_ratio * month_ratio), not just the raw quinquennal input.
+# Confidence interval grows with census offset for extended years.
 EXTEND_DEPARTMENT_WITH_CAGR = """
 CREATE OR REPLACE TABLE population_department AS
 WITH kept AS (
@@ -194,7 +264,24 @@ extended AS (
         c.sex,
         c.geo_precision,
         c.last_pop
-            * POWER(1 + c.rate, fy.year - {max_data_year}) AS population
+            * POWER(1 + c.rate, fy.year - {max_data_year}) AS population,
+        CASE
+            WHEN ABS(fy.year - {census_year}) <= 1 THEN {ci_base_near}
+            WHEN ABS(fy.year - {census_year}) <= 3 THEN {ci_base_mid}
+            ELSE {ci_per_year} * ABS(fy.year - {census_year})
+        END AS confidence_pct,
+        c.last_pop * POWER(1 + c.rate, fy.year - {max_data_year})
+            * (1.0 - CASE
+                WHEN ABS(fy.year - {census_year}) <= 1 THEN {ci_base_near}
+                WHEN ABS(fy.year - {census_year}) <= 3 THEN {ci_base_mid}
+                ELSE {ci_per_year} * ABS(fy.year - {census_year})
+            END) AS population_low,
+        c.last_pop * POWER(1 + c.rate, fy.year - {max_data_year})
+            * (1.0 + CASE
+                WHEN ABS(fy.year - {census_year}) <= 1 THEN {ci_base_near}
+                WHEN ABS(fy.year - {census_year}) <= 3 THEN {ci_base_mid}
+                ELSE {ci_per_year} * ABS(fy.year - {census_year})
+            END) AS population_high
     FROM cagr c
     CROSS JOIN future_years fy
 )

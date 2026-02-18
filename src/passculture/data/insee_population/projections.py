@@ -17,7 +17,17 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from passculture.data.insee_population import sql
-from passculture.data.insee_population.constants import AGE_BUCKETS
+from passculture.data.insee_population.constants import (
+    AGE_BUCKETS,
+    CI_BASE_MID,
+    CI_BASE_NEAR,
+    CI_EXTRA_CANTON,
+    CI_EXTRA_EPCI,
+    CI_EXTRA_IRIS,
+    CI_PER_YEAR,
+    STUDENT_MOBILITY_BLEND_CAP,
+    STUDENT_MOBILITY_BLEND_DEFAULT,
+)
 
 if TYPE_CHECKING:
     import duckdb
@@ -67,7 +77,7 @@ def compute_geo_ratios(conn: duckdb.DuckDBPyConnection, level: str) -> None:
 
     Args:
         conn: DuckDB connection with `population` and `commune_epci` tables
-        level: 'epci' or 'iris'
+        level: 'epci', 'canton', or 'iris'
     """
     age_band_cases = _build_age_band_cases()
     if level == "epci":
@@ -77,6 +87,13 @@ def compute_geo_ratios(conn: duckdb.DuckDBPyConnection, level: str) -> None:
             "SELECT COUNT(DISTINCT epci_code) FROM geo_ratios_epci"
         ).fetchone()[0]
         print(f"  EPCI geo ratios: {count:,} rows across {epcis} EPCIs")
+    elif level == "canton":
+        conn.execute(sql.CREATE_GEO_RATIOS_CANTON.format(age_band_cases=age_band_cases))
+        count = conn.execute("SELECT COUNT(*) FROM geo_ratios_canton").fetchone()[0]
+        cantons = conn.execute(
+            "SELECT COUNT(DISTINCT canton_code) FROM geo_ratios_canton"
+        ).fetchone()[0]
+        print(f"  Canton geo ratios: {count:,} rows across {cantons} cantons")
     elif level == "iris":
         conn.execute(sql.CREATE_GEO_RATIOS_IRIS.format(age_band_cases=age_band_cases))
         count = conn.execute("SELECT COUNT(*) FROM geo_ratios_iris").fetchone()[0]
@@ -97,6 +114,7 @@ def project_multi_year(
     min_age: int,
     max_age: int,
     end_year: int | None = None,
+    census_year: int = 2022,
 ) -> None:
     """Project multi-year monthly population at all geographic levels.
 
@@ -105,21 +123,31 @@ def project_multi_year(
     - `monthly_births`: from download_monthly_birth_distribution
     - `age_ratios`, `age_ratios_fallback`: from compute_age_ratios
     - `geo_ratios_epci`: from compute_geo_ratios('epci')
+    - `geo_ratios_canton`: from compute_geo_ratios('canton')
     - `geo_ratios_iris`: from compute_geo_ratios('iris')
 
     When end_year exceeds the quinquennal data range, the department table
     is first built from real data then extended using CAGR computed on
     the final projected output (not raw quinquennal input).
 
-    Creates: `population_department`, `population_epci`, `population_iris`
+    Creates: `population_department`, `population_epci`, `population_canton`,
+             `population_iris`
     """
     print("Projecting multi-year population...")
 
     age_band_cases = _build_age_band_cases()
+    ci_params = {
+        "census_year": census_year,
+        "ci_base_near": CI_BASE_NEAR,
+        "ci_base_mid": CI_BASE_MID,
+        "ci_per_year": CI_PER_YEAR,
+    }
 
     # Department level (from real pipeline data)
     conn.execute(
-        sql.CREATE_PROJECTED_DEPARTMENT.format(min_age=min_age, max_age=max_age)
+        sql.CREATE_PROJECTED_DEPARTMENT.format(
+            min_age=min_age, max_age=max_age, **ci_params
+        )
     )
 
     # Extend with CAGR if requested end_year exceeds projected data
@@ -141,6 +169,7 @@ def project_multi_year(
                 max_data_year=max_data_year,
                 first_trend_year=first_trend_year,
                 end_year=end_year,
+                **ci_params,
             )
         )
 
@@ -158,7 +187,12 @@ def project_multi_year(
     )
 
     # EPCI level (from extended department table)
-    conn.execute(sql.CREATE_PROJECTED_EPCI.format(age_band_cases=age_band_cases))
+    conn.execute(
+        sql.CREATE_PROJECTED_EPCI.format(
+            age_band_cases=age_band_cases,
+            ci_extra_epci=CI_EXTRA_EPCI,
+        )
+    )
     epci_stats = conn.execute("""
         SELECT COUNT(*), SUM(population), COUNT(DISTINCT epci_code)
         FROM population_epci
@@ -166,8 +200,30 @@ def project_multi_year(
     epci_count, _epci_pop, n_epcis = epci_stats
     print(f"  EPCI: {epci_count:,} rows, {n_epcis} EPCIs")
 
+    # Canton level (from extended department table)
+    conn.execute(
+        sql.CREATE_PROJECTED_CANTON.format(
+            age_band_cases=age_band_cases,
+            ci_extra_canton=CI_EXTRA_CANTON,
+        )
+    )
+    canton_stats = conn.execute("""
+        SELECT COUNT(*), SUM(population), COUNT(DISTINCT canton_code)
+        FROM population_canton
+    """).fetchone()
+    canton_count, canton_pop, n_cantons = canton_stats
+    canton_pct = round(100 * canton_pop / dept_pop, 1) if dept_pop else 0
+    print(
+        f"  Canton: {canton_count:,} rows, {n_cantons} cantons ({canton_pct}% coverage)"
+    )
+
     # IRIS level (from extended department table)
-    conn.execute(sql.CREATE_PROJECTED_IRIS.format(age_band_cases=age_band_cases))
+    conn.execute(
+        sql.CREATE_PROJECTED_IRIS.format(
+            age_band_cases=age_band_cases,
+            ci_extra_iris=CI_EXTRA_IRIS,
+        )
+    )
     iris_stats = conn.execute("""
         SELECT COUNT(*), SUM(population), COUNT(DISTINCT iris_code)
         FROM population_iris
@@ -177,26 +233,53 @@ def project_multi_year(
     print(f"  IRIS: {iris_count:,} rows, {n_irises} IRIS ({iris_pct}% coverage)")
 
 
+def compute_department_mobility_rates(
+    conn: duckdb.DuckDBPyConnection,
+    mobsco_path: Path,
+) -> None:
+    """Compute per-department student inter-departmental mobility rates.
+
+    For each department, computes the fraction of students (AGEREV10='18',
+    ages 18-24) who study in a different department. Creates a
+    `mobility_weights` table with `blend_weight = min(mobility_rate, CAP)`,
+    falling back to BLEND_DEFAULT for departments not in MOBSCO.
+
+    Requires `commune_epci` table to exist (for dept lookup from commune).
+
+    Args:
+        conn: DuckDB connection
+        mobsco_path: Path to MOBSCO parquet file
+    """
+    conn.execute(
+        sql.CREATE_MOBILITY_WEIGHTS.format(
+            mobsco_path=mobsco_path,
+            blend_default=STUDENT_MOBILITY_BLEND_DEFAULT,
+            blend_cap=STUDENT_MOBILITY_BLEND_CAP,
+        )
+    )
+    count = conn.execute("SELECT COUNT(*) FROM mobility_weights").fetchone()[0]
+    print(f"  Mobility weights: {count} departments")
+
+
 def apply_student_mobility_correction(
     conn: duckdb.DuckDBPyConnection,
     mobsco_path: Path,
-    blend_weight: float = 0.3,
 ) -> None:
     """Blend MOBSCO study-destination ratios into EPCI geo_ratios for student bands.
 
     For age bands 15_19 and 20_24, blends census-based geo_ratios with
-    study-destination ratios from the MOBSCO file:
+    study-destination ratios from the MOBSCO file, using per-department
+    blend weights from the `mobility_weights` table:
         corrected = (1 - w) * census_ratio + w * study_ratio
     Then renormalizes so ratios sum to 1 per (dept, band, sex).
 
     Other age bands are unchanged.
 
-    Requires `geo_ratios_epci` and `commune_epci` tables to exist.
+    Requires `geo_ratios_epci`, `commune_epci`, and `mobility_weights` tables.
 
     Args:
         conn: DuckDB connection with geo_ratios_epci table
         mobsco_path: Path to MOBSCO parquet file
-        blend_weight: Weight for study-based ratios (0-1)
     """
     # 1. Rename existing geo_ratios_epci to _base
     conn.execute(sql.RENAME_GEO_RATIOS_EPCI_TO_BASE)
@@ -210,11 +293,9 @@ def apply_student_mobility_correction(
     print(f"  Student flows: {flow_count:,} rows across {flow_depts} departments")
 
     # 3. Create corrected geo_ratios_epci (blend + renormalize)
-    conn.execute(sql.CREATE_CORRECTED_GEO_RATIOS_EPCI.format(blend_weight=blend_weight))
+    conn.execute(sql.CREATE_CORRECTED_GEO_RATIOS_EPCI)
     new_count = conn.execute("SELECT COUNT(*) FROM geo_ratios_epci").fetchone()[0]
-    print(
-        f"  Corrected EPCI geo ratios: {new_count:,} rows (blend_weight={blend_weight})"
-    )
+    print(f"  Corrected EPCI geo ratios: {new_count:,} rows (per-dept blend weights)")
 
     # 4. Clean up temporary tables
     conn.execute("DROP TABLE IF EXISTS geo_ratios_epci_base")
@@ -224,19 +305,18 @@ def apply_student_mobility_correction(
 def apply_student_mobility_correction_iris(
     conn: duckdb.DuckDBPyConnection,
     mobsco_path: Path,
-    blend_weight: float = 0.3,
 ) -> None:
     """Blend MOBSCO study-destination ratios into IRIS geo_ratios for student bands.
 
     Same logic as the EPCI version but at IRIS level. MOBSCO commune-level
     flows are distributed to IRIS using census population proportions.
 
-    Requires `geo_ratios_iris`, `population`, and `commune_epci` tables.
+    Requires `geo_ratios_iris`, `population`, `commune_epci`, and
+    `mobility_weights` tables.
 
     Args:
         conn: DuckDB connection with geo_ratios_iris table
         mobsco_path: Path to MOBSCO parquet file
-        blend_weight: Weight for study-based ratios (0-1)
     """
     # 1. Rename existing geo_ratios_iris to _base
     conn.execute(sql.RENAME_GEO_RATIOS_IRIS_TO_BASE)
@@ -250,11 +330,9 @@ def apply_student_mobility_correction_iris(
     print(f"  IRIS student flows: {flow_count:,} rows across {flow_depts} departments")
 
     # 3. Create corrected geo_ratios_iris (blend + renormalize)
-    conn.execute(sql.CREATE_CORRECTED_GEO_RATIOS_IRIS.format(blend_weight=blend_weight))
+    conn.execute(sql.CREATE_CORRECTED_GEO_RATIOS_IRIS)
     new_count = conn.execute("SELECT COUNT(*) FROM geo_ratios_iris").fetchone()[0]
-    print(
-        f"  Corrected IRIS geo ratios: {new_count:,} rows (blend_weight={blend_weight})"
-    )
+    print(f"  Corrected IRIS geo ratios: {new_count:,} rows (per-dept blend weights)")
 
     # 4. Clean up temporary tables
     conn.execute("DROP TABLE IF EXISTS geo_ratios_iris_base")
