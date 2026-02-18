@@ -398,6 +398,7 @@ class TestMultiYearProjection:
 
         # Compute geo ratios
         compute_geo_ratios(processor.conn, "epci")
+        compute_geo_ratios(processor.conn, "canton")
         compute_geo_ratios(processor.conn, "iris")
 
     def test_projected_department_has_required_columns(self, projection_processor):
@@ -419,6 +420,9 @@ class TestMultiYearProjection:
             "sex",
             "geo_precision",
             "population",
+            "confidence_pct",
+            "population_low",
+            "population_high",
         }
         assert required_cols.issubset(set(result.columns))
 
@@ -692,6 +696,7 @@ class TestAgeRatios:
         processor._execute(sql.REGISTER_MONTHLY_BIRTHS)
 
         compute_geo_ratios(processor.conn, "epci")
+        compute_geo_ratios(processor.conn, "canton")
         compute_geo_ratios(processor.conn, "iris")
         project_multi_year(processor.conn, 1, 25)
 
@@ -1236,6 +1241,13 @@ class TestStudentMobilityCorrection:
         mobsco_path = tmp_path / "mobsco_test.parquet"
         _duckdb.sql("SELECT * FROM mobsco_df").write_parquet(str(mobsco_path))
 
+        # Compute per-department mobility weights (needed before corrections)
+        from passculture.data.insee_population.projections import (
+            compute_department_mobility_rates,
+        )
+
+        compute_department_mobility_rates(processor.conn, mobsco_path)
+
         return processor, mobsco_path
 
     def test_student_flows_computed(self, mobility_processor):
@@ -1375,6 +1387,33 @@ class TestStudentMobilityCorrection:
             corrected_other.reset_index(drop=True),
         )
 
+    def test_blend_weight_varies_by_department(self, mobility_processor):
+        """Mobility weights should vary by department based on MOBSCO data."""
+        processor, _mobsco_path = mobility_processor
+
+        weights = processor.conn.execute("""
+            SELECT department_code, blend_weight, mobility_rate
+            FROM mobility_weights
+            ORDER BY department_code
+        """).df()
+
+        # Dept 75: students from 75101 study in 13001 (cross-dept) and 75102
+        # → has inter-departmental mobility (50+50 out of 50+50+30+30 = 100/160)
+        dept_75 = weights[weights["department_code"] == "75"]
+        assert len(dept_75) == 1
+        assert dept_75["mobility_rate"].values[0] > 0  # has cross-dept flows
+
+        # Dept 13: all students study within dept 13 (commune 13001)
+        # → 0% inter-departmental mobility
+        dept_13 = weights[weights["department_code"] == "13"]
+        assert len(dept_13) == 1
+        assert dept_13["mobility_rate"].values[0] == 0.0
+
+        # Blend weights should differ between departments
+        assert dept_75["blend_weight"].values[0] != dept_13["blend_weight"].values[0], (
+            "Blend weights should differ between departments with different mobility"
+        )
+
 
 # -----------------------------------------------------------------------------
 # Test: Clamped Age Ratios (far-future projection fix)
@@ -1488,23 +1527,35 @@ class TestClampedAgeRatios:
 
 
 # -----------------------------------------------------------------------------
-# Test: Census-Derived Quinquennal
+# Test: Quinquennal Pass-Through
 # -----------------------------------------------------------------------------
 
 
-class TestCensusDerivedQuinquennal:
-    """Tests for replacing CAGR-extrapolated quinquennal with census sums."""
+class TestQuinquennalPassThrough:
+    """Tests that quinquennal values pass through unchanged to projection."""
 
-    def test_census_derived_replaces_cagr(self):
-        """For bands where all cohort ages exist in census, quinquennal
-        should match census sum rather than CAGR-extrapolated value.
+    def test_quinquennal_values_preserved(self):
+        """Quinquennal band totals should be used as-is (no census replacement).
+
+        The age_ratios sum to 1 within each band, so department-level
+        yearly totals should equal quinquennal values exactly.
         """
         from passculture.data.insee_population import sql
-        from passculture.data.insee_population.projections import _build_age_band_cases
+        from passculture.data.insee_population.projections import (
+            compute_age_ratios,
+            project_multi_year,
+        )
 
-        processor = PopulationProcessor(cache_dir=None)
+        processor = PopulationProcessor(
+            year=2022,
+            min_age=15,
+            max_age=19,
+            start_year=2022,
+            end_year=2022,
+            cache_dir=None,
+        )
 
-        # Census (year 2022) with known age distribution for ages 0-24
+        # Census with known age distribution
         rows = ",\n            ".join(
             f"(2022, '75', '11', '7599', '75101', '751010101',"
             f" {age}, 'male', {100.0 + age * 2})"
@@ -1518,147 +1569,50 @@ class TestCensusDerivedQuinquennal:
                    canton_code, commune_code, iris_code,
                    age, sex, population)
         """)
+        processor._base_table_created = True
 
-        # Quinquennal with CAGR-inflated value for 2025
-        # Band 15_19: census ages would be 12-16 (shift=-3), all in census
-        processor.conn.execute("""
-            CREATE OR REPLACE TABLE quinquennal AS
-            SELECT * FROM (VALUES
-                (2025, '75', 'male', '15_19', 9999.0),
-                (2025, '75', 'male', '20_24', 8888.0)
-            ) AS t(year, department_code, sex, age_band, population)
-        """)
-
-        age_band_cases = _build_age_band_cases()
-        processor.conn.execute(
-            sql.REPLACE_QUINQUENNAL_WITH_CENSUS.format(
-                age_band_cases=age_band_cases, census_year=2022
-            )
-        )
-
-        result = processor.conn.execute("""
-            SELECT age_band, population FROM quinquennal
-            ORDER BY age_band
-        """).df()
-
-        # Band 15_19: census ages 12-16, sum = 640
-        band_15_19 = result[result["age_band"] == "15_19"]["population"].values[0]
-        expected_15_19 = sum(100.0 + age * 2 for age in range(12, 17))
-        assert abs(band_15_19 - expected_15_19) < 0.01, (
-            f"Band 15_19 should be {expected_15_19}, got {band_15_19}"
-        )
-
-        # Band 20_24: census ages 17-21, all in census (ages 0-24)
-        band_20_24 = result[result["age_band"] == "20_24"]["population"].values[0]
-        expected_20_24 = sum(100.0 + age * 2 for age in range(17, 22))
-        assert abs(band_20_24 - expected_20_24) < 0.01, (
-            f"Band 20_24 should be {expected_20_24}, got {band_20_24}"
-        )
-
-    def test_keeps_original_when_census_incomplete(self):
-        """For bands where some cohort ages are outside census range (0-120),
-        the original quinquennal value should be kept.
-        """
-        from passculture.data.insee_population import sql
-        from passculture.data.insee_population.projections import _build_age_band_cases
-
-        processor = PopulationProcessor(cache_dir=None)
-
-        # Census only has ages 5-24 (no ages 0-4)
-        rows = ",\n            ".join(
-            f"(2022, '75', '11', '7599', '75101', '751010101', {age}, 'male', 100.0)"
-            for age in range(5, 25)
-        )
+        # Quinquennal with a specific value for 15_19
+        quinquennal_pop = 5000.0
         processor.conn.execute(f"""
-            CREATE OR REPLACE TABLE population AS
-            SELECT * FROM (VALUES
-                {rows}
-            ) AS t(year, department_code, region_code,
-                   canton_code, commune_code, iris_code,
-                   age, sex, population)
-        """)
-
-        # Year 2040: band 15_19 needs census ages -3 to 1
-        # min_census_age < 0 → keeps original
-        processor.conn.execute("""
             CREATE OR REPLACE TABLE quinquennal AS
             SELECT * FROM (VALUES
-                (2040, '75', 'male', '15_19', 7777.0)
+                (2022, '75', 'male', '15_19', {quinquennal_pop})
             ) AS t(year, department_code, sex, age_band, population)
         """)
 
-        age_band_cases = _build_age_band_cases()
-        processor.conn.execute(
-            sql.REPLACE_QUINQUENNAL_WITH_CENSUS.format(
-                age_band_cases=age_band_cases, census_year=2022
-            )
+        compute_age_ratios(processor.conn, census_year=2022)
+
+        # Monthly births (uniform)
+        monthly_df = pd.DataFrame(
+            [
+                {"department_code": "75", "month": m, "month_ratio": 1.0 / 12}
+                for m in range(1, 13)
+            ]
         )
+        processor._register_dataframe("monthly_births_df", monthly_df)
+        processor._execute(sql.REGISTER_MONTHLY_BIRTHS)
 
-        result = float(
-            processor.conn.execute(
-                "SELECT population FROM quinquennal WHERE age_band = '15_19'"
-            ).fetchone()[0]
-        )
-        assert abs(result - 7777.0) < 0.01, f"Should keep original 7777.0, got {result}"
+        # Need geo ratios for project_multi_year but only checking department
+        _setup_geo_mappings(processor)
+        from passculture.data.insee_population.projections import compute_geo_ratios
 
-    def test_census_derived_coverage_boundary(self):
-        """Census year 2022: band 15_19 should be census-derived up to year 2037
-        (cohort ages 0-4) and keep original for year 2038 (cohort ages -1 to 3).
-        """
-        from passculture.data.insee_population import sql
-        from passculture.data.insee_population.projections import _build_age_band_cases
+        compute_geo_ratios(processor.conn, "epci")
+        compute_geo_ratios(processor.conn, "canton")
+        compute_geo_ratios(processor.conn, "iris")
 
-        processor = PopulationProcessor(cache_dir=None)
+        project_multi_year(processor.conn, 15, 19)
 
-        # Census with ages 0-120
-        rows = ",\n            ".join(
-            f"(2022, '75', '11', '7599', '75101', '751010101', {age}, 'male', 100.0)"
-            for age in range(0, 121)
-        )
-        processor.conn.execute(f"""
-            CREATE OR REPLACE TABLE population AS
-            SELECT * FROM (VALUES
-                {rows}
-            ) AS t(year, department_code, region_code,
-                   canton_code, commune_code, iris_code,
-                   age, sex, population)
-        """)
+        # Sum population across months for year=2022, dept=75, male, ages 15-19
+        total = processor.conn.execute("""
+            SELECT SUM(population)
+            FROM population_department
+            WHERE year = 2022 AND department_code = '75' AND sex = 'male'
+        """).fetchone()[0]
 
-        # Year 2037: band 15_19, census ages 0 to 4 → OK
-        # Year 2038: min_census_age < 0 → keeps original
-        processor.conn.execute("""
-            CREATE OR REPLACE TABLE quinquennal AS
-            SELECT * FROM (VALUES
-                (2037, '75', 'male', '15_19', 9999.0),
-                (2038, '75', 'male', '15_19', 8888.0)
-            ) AS t(year, department_code, sex, age_band, population)
-        """)
-
-        age_band_cases = _build_age_band_cases()
-        processor.conn.execute(
-            sql.REPLACE_QUINQUENNAL_WITH_CENSUS.format(
-                age_band_cases=age_band_cases, census_year=2022
-            )
-        )
-
-        pop_2037 = float(
-            processor.conn.execute(
-                "SELECT population FROM quinquennal WHERE year = 2037"
-            ).fetchone()[0]
-        )
-        pop_2038 = float(
-            processor.conn.execute(
-                "SELECT population FROM quinquennal WHERE year = 2038"
-            ).fetchone()[0]
-        )
-
-        # 2037 should be census-derived: 5 ages * 100 = 500
-        assert abs(pop_2037 - 500.0) < 0.01, (
-            f"2037 should be census-derived (500), got {pop_2037}"
-        )
-        # 2038 should keep original
-        assert abs(pop_2038 - 8888.0) < 0.01, (
-            f"2038 should keep original (8888), got {pop_2038}"
+        # Should equal quinquennal value (age_ratios sum to 1, month_ratios sum to 1)
+        assert abs(total - quinquennal_pop) < 1.0, (
+            f"Department total ({total:.1f}) should equal "
+            f"quinquennal ({quinquennal_pop:.1f})"
         )
 
 
@@ -1750,6 +1704,13 @@ class TestIRISStudentMobilityCorrection:
         mobsco_df = pd.DataFrame(mobsco_data)  # noqa: F841
         mobsco_path = tmp_path / "mobsco_test.parquet"
         _duckdb.sql("SELECT * FROM mobsco_df").write_parquet(str(mobsco_path))
+
+        # Compute per-department mobility weights (needed before corrections)
+        from passculture.data.insee_population.projections import (
+            compute_department_mobility_rates,
+        )
+
+        compute_department_mobility_rates(processor.conn, mobsco_path)
 
         return processor, mobsco_path
 

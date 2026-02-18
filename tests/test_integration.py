@@ -485,7 +485,14 @@ def census_processor():
         if not (CACHE_DIR / fname).exists():
             pytest.skip(f"Missing cache file: {fname}")
 
-    proc = PopulationProcessor(year=2022, min_age=0, max_age=25, cache_dir=CACHE_DIR)
+    proc = PopulationProcessor(
+        year=2022,
+        min_age=0,
+        max_age=25,
+        start_year=2022,
+        end_year=2024,
+        cache_dir=CACHE_DIR,
+    )
     proc.download_and_process()
     proc.create_multi_level_tables()
     return proc

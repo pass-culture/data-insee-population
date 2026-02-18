@@ -3,6 +3,7 @@
 __all__ = [
     "CREATE_AGE_RATIOS",
     "CREATE_AGE_RATIOS_FALLBACK",
+    "CREATE_GEO_RATIOS_CANTON",
     "CREATE_GEO_RATIOS_EPCI",
     "CREATE_GEO_RATIOS_IRIS",
 ]
@@ -194,4 +195,57 @@ JOIN dept_totals dt
     ON ip.department_code = dt.department_code
     AND ip.age_band = dt.age_band
     AND ip.sex = dt.sex
+"""
+
+# Compute canton share within each dept/age_band/sex from INDCVI population
+CREATE_GEO_RATIOS_CANTON = """
+CREATE OR REPLACE TABLE geo_ratios_canton AS
+WITH age_band_map AS (
+    SELECT
+        age,
+        CASE
+            {age_band_cases}
+        END AS age_band
+    FROM generate_series(0, 120) AS t(age)
+),
+canton_pop AS (
+    SELECT
+        p.department_code,
+        p.region_code,
+        p.canton_code,
+        abm.age_band,
+        p.sex,
+        SUM(p.population) AS canton_population
+    FROM population p
+    JOIN age_band_map abm ON p.age = abm.age
+    WHERE p.canton_code IS NOT NULL
+      AND p.canton_code <> ''
+      AND abm.age_band IS NOT NULL
+    GROUP BY p.department_code, p.region_code, p.canton_code,
+             abm.age_band, p.sex
+),
+dept_totals AS (
+    SELECT
+        department_code,
+        age_band,
+        sex,
+        SUM(canton_population) AS dept_population
+    FROM canton_pop
+    GROUP BY department_code, age_band, sex
+)
+SELECT
+    cp.department_code,
+    cp.region_code,
+    cp.canton_code,
+    cp.age_band,
+    cp.sex,
+    CASE
+        WHEN dt.dept_population > 0 THEN cp.canton_population / dt.dept_population
+        ELSE 0
+    END AS geo_ratio
+FROM canton_pop cp
+JOIN dept_totals dt
+    ON cp.department_code = dt.department_code
+    AND cp.age_band = dt.age_band
+    AND cp.sex = dt.sex
 """

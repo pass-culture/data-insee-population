@@ -53,9 +53,12 @@ MOBSCO_URL = (
     "https://www.insee.fr/fr/statistiques/fichier/8589945/RP2022_mobsco.parquet"
 )
 
-# Blend weight for student mobility correction on EPCI geo ratios
+# Student mobility correction constants for EPCI/IRIS geo ratios
 # corrected = (1 - w) * census_ratio + w * study_ratio, for 15_19/20_24 bands
-STUDENT_MOBILITY_BLEND_WEIGHT = 0.3
+# Default blend weight (fallback for departments not in MOBSCO)
+STUDENT_MOBILITY_BLEND_DEFAULT = 0.3
+# Maximum blend weight to prevent over-correction in high-mobility departments
+STUDENT_MOBILITY_BLEND_CAP = 0.6
 
 # Population estimates by age quinquennial (5-year bands) by department
 # Better for validating specific age ranges like 15-20
@@ -124,6 +127,15 @@ AGE_BUCKETS = {
     "95_plus": range(95, 121),
 }
 
+# Confidence interval parameters (error estimates by census offset)
+# Based on historical analysis of model vs official INSEE data
+CI_BASE_NEAR = 0.02  # 0-1 years from census
+CI_BASE_MID = 0.03  # 2-3 years from census
+CI_PER_YEAR = 0.01  # per year of offset beyond 3 years
+CI_EXTRA_CANTON = 0.05  # additional uncertainty for canton geo_ratio
+CI_EXTRA_EPCI = 0.03  # additional uncertainty for EPCI geo_ratio
+CI_EXTRA_IRIS = 0.10  # additional uncertainty for IRIS geo_ratio
+
 # Maximum years of CAGR extrapolation beyond the pipeline's valid range.
 # The pipeline produces reliable projections up to census_year + min_age
 # (the point where cohort-shifted age ratios remain valid). Beyond that,
@@ -146,4 +158,19 @@ POPULATION_SCHEMA = [
     {"name": "age", "type": "INTEGER", "description": "Age in completed years (0-120)"},
     {"name": "sex", "type": "STRING", "description": "Sex (male/female)"},
     {"name": "population", "type": "INTEGER", "description": "Population count"},
+    {
+        "name": "confidence_pct",
+        "type": "FLOAT",
+        "description": "Estimated error margin (0-1)",
+    },
+    {
+        "name": "population_low",
+        "type": "FLOAT",
+        "description": "Population lower bound (population * (1 - confidence_pct))",
+    },
+    {
+        "name": "population_high",
+        "type": "FLOAT",
+        "description": "Population upper bound (population * (1 + confidence_pct))",
+    },
 ]

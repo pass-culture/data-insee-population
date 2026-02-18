@@ -84,6 +84,45 @@ export async function initDB() {
 }
 
 /**
+ * Load canton data for a specific department (lazy).
+ * Creates a view named canton_{deptCode} (e.g. canton_75).
+ */
+export async function loadCantonDepartment(deptCode) {
+  const viewName = `canton_${deptCode.replace(/[^a-zA-Z0-9]/g, "")}`;
+
+  try {
+    const check = await conn.query(
+      `SELECT 1 FROM information_schema.tables WHERE table_name = '${viewName}'`
+    );
+    if (check.numRows > 0) return viewName;
+  } catch {
+    // View doesn't exist, create it
+  }
+
+  const fileName = `population_canton_${deptCode}.parquet`;
+  const fileUrl = `${location.origin}${PARQUET_BASE}/canton/${fileName}`;
+
+  try {
+    await db.registerFileURL(
+      fileName,
+      fileUrl,
+      duckdb.DuckDBDataProtocol.HTTP,
+      false
+    );
+    await conn.query(`
+      CREATE VIEW ${viewName} AS
+      SELECT * FROM read_parquet('${fileName}')
+    `);
+    console.log(`[db] Loaded canton for dept ${deptCode}`);
+  } catch (e) {
+    console.warn(`[db] Failed to load canton for dept ${deptCode}:`, e.message);
+    return null;
+  }
+
+  return viewName;
+}
+
+/**
  * Load IRIS data for a specific department (lazy).
  * Creates a view named iris_{deptCode} (e.g. iris_75).
  */

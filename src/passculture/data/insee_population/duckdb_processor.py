@@ -96,6 +96,11 @@ class PopulationProcessor:
             )
 
         self.conn = duckdb.connect()
+        # Allow DuckDB to spill to disk when in-memory tables exceed RAM
+        if self.cache_dir:
+            temp_dir = Path(self.cache_dir) / "duckdb_temp"
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            self.conn.execute(f"SET temp_directory='{temp_dir}'")
         self._base_table_created = False
         self._geo_mappings_loaded = False
 
@@ -154,18 +159,6 @@ class PopulationProcessor:
         self._register_dataframe("quinquennal_df", quinquennal_df)
         self._execute(sql.REGISTER_QUINQUENNAL)
 
-        # Replace CAGR-extrapolated quinquennal with census-derived totals
-        # for bands where all cohort ages are available in the census
-        from passculture.data.insee_population.projections import _build_age_band_cases
-
-        print("  Replacing extrapolated bands with census-derived totals...")
-        age_band_cases = _build_age_band_cases()
-        self._execute(
-            sql.REPLACE_QUINQUENNAL_WITH_CENSUS.format(
-                age_band_cases=age_band_cases, census_year=self.year
-            )
-        )
-
         if self.include_mayotte:
             mayotte_years = quinquennal_df[quinquennal_df["department_code"] == "976"][
                 "year"
@@ -221,30 +214,36 @@ class PopulationProcessor:
         # 4. Compute geographic ratios
         print("Step 4: Computing geographic ratios...")
         compute_geo_ratios(self.conn, "epci")
+        compute_geo_ratios(self.conn, "canton")
         compute_geo_ratios(self.conn, "iris")
 
-        # 4b. Apply student mobility correction to EPCI geo ratios
+        # 4b. Apply student mobility correction to EPCI and IRIS geo ratios
         if self.correct_student_mobility:
             from passculture.data.insee_population.downloaders import download_mobsco
             from passculture.data.insee_population.projections import (
                 apply_student_mobility_correction,
+                apply_student_mobility_correction_iris,
+                compute_department_mobility_rates,
             )
 
-            print("Step 4b: Correcting EPCI geo ratios for student mobility...")
+            print("Step 4b: Computing department mobility rates...")
             mobsco_path = download_mobsco(self.cache_dir)
+            compute_department_mobility_rates(self.conn, mobsco_path)
+
+            print("Step 4c: Correcting EPCI geo ratios for student mobility...")
             apply_student_mobility_correction(self.conn, mobsco_path)
 
-            from passculture.data.insee_population.projections import (
-                apply_student_mobility_correction_iris,
-            )
-
-            print("Step 4c: Correcting IRIS geo ratios for student mobility...")
+            print("Step 4d: Correcting IRIS geo ratios for student mobility...")
             apply_student_mobility_correction_iris(self.conn, mobsco_path)
 
         # 5. Project multi-year at all levels
         print("Step 5: Projecting population...")
         project_multi_year(
-            self.conn, self.min_age, self.max_age, end_year=self.end_year
+            self.conn,
+            self.min_age,
+            self.max_age,
+            end_year=self.end_year,
+            census_year=self.year,
         )
 
         return self
@@ -262,7 +261,7 @@ class PopulationProcessor:
         output_dir.mkdir(parents=True, exist_ok=True)
 
         paths = {}
-        for level in ["department", "epci", "iris"]:
+        for level in ["department", "epci", "canton", "iris"]:
             path = output_dir / f"population_{level}.parquet"
             query = getattr(sql, f"COPY_{level.upper()}_TO_PARQUET")
             self._execute(query.format(path=path))
@@ -276,6 +275,7 @@ class PopulationProcessor:
         for _level, query in [
             ("department", sql.GET_DEPARTMENT_SUMMARY),
             ("epci", sql.GET_EPCI_SUMMARY),
+            ("canton", sql.GET_CANTON_SUMMARY),
             ("iris", sql.GET_IRIS_SUMMARY),
         ]:
             try:

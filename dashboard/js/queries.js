@@ -128,6 +128,19 @@ export function epciRanking(year, filters) {
   `;
 }
 
+export function cantonRanking(viewName, year, filters) {
+  const extra = filters ? ` AND ${filterWhere(filters)}` : "";
+  return `
+    SELECT
+      canton_code,
+      ROUND(SUM(population), 0) as total_population
+    FROM ${viewName}
+    WHERE year = ${year} AND canton_code IS NOT NULL${extra}
+    GROUP BY canton_code
+    ORDER BY total_population DESC
+  `;
+}
+
 export function epciCountByDept(year, filters) {
   const extra = filters ? ` AND ${filterWhere(filters)}` : "";
   return `
@@ -397,5 +410,66 @@ export function hasMonthlyData() {
     SELECT COUNT(DISTINCT month) as month_count
     FROM dept
     WHERE month IS NOT NULL
+  `;
+}
+
+export function explorerUnitDetail(table, codeCol, codeVal, year, filters) {
+  const extra = filters ? ` AND ${filterWhere(filters)}` : "";
+  return `
+    SELECT
+      ROUND(SUM(population), 0) as total_population,
+      ROUND(SUM(CASE WHEN sex = 'male' THEN population ELSE 0 END), 0) as male_population,
+      ROUND(SUM(CASE WHEN sex = 'female' THEN population ELSE 0 END), 0) as female_population
+    FROM ${table}
+    WHERE ${codeCol} = '${codeVal}' AND year = ${year}${extra}
+  `;
+}
+
+export function explorerUnitPyramid(table, codeCol, codeVal, year, filters) {
+  const extra = filters ? ` AND ${filterWhere(filters)}` : "";
+  return `
+    SELECT
+      CASE
+        WHEN age < 5  THEN '0-4'   WHEN age < 10 THEN '5-9'
+        WHEN age < 15 THEN '10-14' WHEN age < 20 THEN '15-19'
+        WHEN age < 25 THEN '20-24' WHEN age < 30 THEN '25-29'
+        WHEN age < 35 THEN '30-34' WHEN age < 40 THEN '35-39'
+        WHEN age < 45 THEN '40-44' WHEN age < 50 THEN '45-49'
+        WHEN age < 55 THEN '50-54' WHEN age < 60 THEN '55-59'
+        WHEN age < 65 THEN '60-64' WHEN age < 70 THEN '65-69'
+        WHEN age < 75 THEN '70-74' WHEN age < 80 THEN '75-79'
+        WHEN age < 85 THEN '80-84' WHEN age < 90 THEN '85-89'
+        WHEN age < 95 THEN '90-94' ELSE '95+'
+      END as age_band,
+      sex,
+      ROUND(SUM(population), 0) as population
+    FROM ${table}
+    WHERE ${codeCol} = '${codeVal}' AND year = ${year}${extra}
+    GROUP BY age_band, sex
+    ORDER BY age_band, sex
+  `;
+}
+
+export function explorerUnitPyramidPerAge(table, codeCol, codeVal, year, filters) {
+  const extra = filters ? ` AND ${filterWhere(filters)}` : "";
+  return `
+    SELECT age, sex, ROUND(SUM(population), 0) as population
+    FROM ${table}
+    WHERE ${codeCol} = '${codeVal}' AND year = ${year}${extra}
+    GROUP BY age, sex
+    ORDER BY age, sex
+  `;
+}
+
+export function explorerUnitTrend(table, codeCol, codeVal, filters) {
+  const extra = filters ? ` AND ${filterWhere(filters)}` : "";
+  return `
+    SELECT
+      year,
+      ROUND(SUM(population), 0) as total_population
+    FROM ${table}
+    WHERE ${codeCol} = '${codeVal}'${extra}
+    GROUP BY year
+    ORDER BY year
   `;
 }

@@ -127,12 +127,6 @@ export async function renderOverview(container) {
       </div>
     </div>
 
-    <div class="card-grid">
-      <div class="card card-full">
-        <h3>Carte des départements</h3>
-        <div class="map-container" id="map-dept"></div>
-      </div>
-    </div>
   `;
 
   // Ranking table
@@ -140,15 +134,4 @@ export async function renderOverview(container) {
     { key: "department_code", label: "Dept", format: (v) => `<a class="dept-link" href="#department/${v}">${v}</a>` },
     { key: "total_population", label: "Population", numeric: true, format: fmt },
   ]);
-
-  // Department map (lazy import to avoid loading Leaflet if not needed)
-  try {
-    const { renderDepartmentMap } = await import("../maps/department-map.js");
-    await renderDepartmentMap(
-      document.getElementById("map-dept"),
-      deptRanking
-    );
-  } catch (e) {
-    document.getElementById("map-dept").innerHTML = `<div class="fr-alert fr-alert--info"><p>Carte indisponible : ${e.message}</p></div>`;
-  }
 }

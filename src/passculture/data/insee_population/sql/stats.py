@@ -1,25 +1,30 @@
 """Output queries, statistics, and validation templates."""
 
 __all__ = [
+    "COPY_CANTON_TO_PARQUET",
     "COPY_DEPARTMENT_TO_PARQUET",
     "COPY_EPCI_TO_PARQUET",
     "COPY_IRIS_TO_PARQUET",
     "COUNT_INVALID_POPULATION",
+    "GET_CANTON_SUMMARY",
     "GET_DEPARTMENT_SUMMARY",
     "GET_DISTINCT_DEPARTMENTS",
     "GET_EPCI_SUMMARY",
     "GET_IRIS_SUMMARY",
     "GET_ROW_COUNT",
     "GET_VALIDATION_STATS",
+    "SELECT_CANTON",
     "SELECT_DEPARTMENT",
     "SELECT_EPCI",
     "SELECT_IRIS",
 ]
 
+SELECT_CANTON = "SELECT * FROM population_canton"
 SELECT_DEPARTMENT = "SELECT * FROM population_department"
 SELECT_IRIS = "SELECT * FROM population_iris"
 SELECT_EPCI = "SELECT * FROM population_epci"
 
+COPY_CANTON_TO_PARQUET = "COPY population_canton TO '{path}' (FORMAT PARQUET)"
 COPY_DEPARTMENT_TO_PARQUET = "COPY population_department TO '{path}' (FORMAT PARQUET)"
 COPY_IRIS_TO_PARQUET = "COPY population_iris TO '{path}' (FORMAT PARQUET)"
 COPY_EPCI_TO_PARQUET = "COPY population_epci TO '{path}' (FORMAT PARQUET)"
@@ -75,4 +80,14 @@ SELECT
     SUM(CASE WHEN geo_precision = 'canton_weighted'
         THEN population ELSE 0 END) AS weighted_population
 FROM population_epci
+"""
+
+GET_CANTON_SUMMARY = """
+SELECT
+    'canton' AS geo_level,
+    COUNT(*) AS rows,
+    SUM(population) AS total_population,
+    COUNT(DISTINCT canton_code) AS geo_units,
+    COUNT(DISTINCT geo_precision) AS precision_types
+FROM population_canton
 """

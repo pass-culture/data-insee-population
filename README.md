@@ -59,11 +59,13 @@ Geographic ratios use the **structure-repeats hypothesis**: the sub-department d
 
 The census records people at their *residence* commune, but students aged 15-24 often live in a different city from where they study. This causes the EPCI geo_ratios for the `15_19` and `20_24` bands to undercount university cities and overcount family-home departments.
 
-When `correct_student_mobility=True` (the default), the pipeline blends census-based geo_ratios with study-destination ratios from the MOBSCO commuting file:
+When `correct_student_mobility=True` (the default), the pipeline blends census-based geo_ratios with study-destination ratios from the MOBSCO commuting file, using **per-department blend weights** derived from actual inter-departmental student mobility rates:
 
 ```
-corrected = (1 - w) * census_ratio + w * study_ratio    (w = 0.3)
+corrected = (1 - w_dept) * census_ratio + w_dept * study_ratio
 ```
+
+Where `w_dept = min(mobility_rate, 0.6)` and `mobility_rate` is the fraction of students in that department who study in a different department. Departments not in MOBSCO use a default weight of 0.3. This gives higher correction weights to Ile-de-France suburbs (50-62% inter-dept mobility) and lower weights to university cities (5-7%).
 
 Then renormalizes so ratios still sum to 1 per (dept, band, sex). Other age bands are unchanged.
 
@@ -72,6 +74,57 @@ Then renormalizes so ratios still sum to 1 per (dept, band, sex). Other age band
 Estimates will not match official INSEE projections exactly. INSEE publishes age-by-age regional projections (https://www.insee.fr/fr/outil-interactif/5014911/pyramide.htm) that use demographic models and data not publicly available at this granularity. For real local estimates, use official INSEE reports. The extrapolations produced here represent the best approximation possible given the openly available data, but should be treated as indicative, not authoritative.
 
 The numbers below are validated by the integration test suite (`tests/test_integration.py`) using 2022 census vs 2022 quinquennal estimates.
+
+### Quantified accuracy for ages 15-24
+
+Comparison of model projections vs official INSEE pyramide data (`donnees_pyramide_act.csv`, national, M+F):
+
+#### 2026 per-age errors
+
+| Age | Model | Official | Error |
+|-----|------:|--------:|------:|
+| 15 | 858,697 | 885,211 | -3.0% |
+| 16 | 863,200 | 871,489 | -1.0% |
+| 17 | 864,491 | 868,144 | -0.4% |
+| 18 | 862,183 | 841,073 | +2.5% |
+| 19 | 861,066 | 833,790 | +3.3% |
+| 20 | 810,281 | 796,876 | +1.7% |
+| 21 | 816,153 | 784,282 | +4.1% |
+| 22 | 809,732 | 772,575 | +4.8% |
+| 23 | 792,602 | 781,668 | +1.4% |
+| 24 | 767,502 | 799,895 | -4.0% |
+| **Total** | **8,305,908** | **8,235,003** | **+0.9%** |
+
+#### Yearly totals (ages 15-24)
+
+| Year | Error | Notes |
+|------|------:|-------|
+| 2015-2022 | 0.0% | Exact match (quinquennal data available) |
+| 2023 | +0.1% | |
+| 2024 | +0.2% | |
+| 2025 | +0.3% | |
+| 2026 | +0.9% | Furthest from census year |
+
+#### Band-level accuracy (2026)
+
+| Band | Model vs official | Notes |
+|------|------------------:|-------|
+| 15_19 | +0.2% | Quinquennal anchoring keeps error very low |
+| 20_24 | +1.5% | Age-ratio drift from cohort-shifting over 4 years |
+
+The quinquennal estimates are used as-is for band totals (no census replacement). Census data provides only the age-ratio *shape* within each 5-year band. This limits national-level band error to ~1.5%. Individual age errors (up to ~5%) come from cohort-shifted age ratios drifting over time.
+
+#### Improvement from removing census-derived replacement
+
+The model previously replaced quinquennal band totals with census-derived cohort sums. Removing this and trusting quinquennal estimates directly improved accuracy significantly:
+
+| Year | Old model error | Current model error |
+|------|----------------:|--------------------:|
+| 2024 | +1.2% (MAE 2.9%) | +0.2% (MAE 2.9%) |
+| 2025 | +1.8% (MAE 3.8%) | +0.3% (MAE 3.0%) |
+| 2026 | +2.4% (MAE 4.3%) | +0.9% (MAE 2.6%) |
+
+The 20_24 band error dropped from +5.8% to +1.5%, and individual age errors for 20-22 dropped from +7-9% to +2-5%.
 
 ### Census vs quinquennal discrepancy by age band
 
@@ -86,6 +139,38 @@ At the department level, census aggregates and quinquennal estimates disagree fo
 At the **national** level (summing all departments), discrepancy drops below **1.5%** for all bands, confirming the errors are spatially distributed, not systematic.
 
 The `20_24` band has the highest *median* department-level discrepancy — more than 2x the median of other bands — confirming student mobility as the dominant source of geographic misallocation.
+
+### Known biases
+
+1. **Structure-repeats hypothesis**: geographic ratios are frozen from the census year. Safe horizon is ~2-3 years; breaks near university towns, ANRU urban renewal zones, and areas with major residential developments.
+
+2. **Month ratio from births**: the monthly distribution is derived from birth data, which is accurate for ages 0-4 but increasingly approximate for older ages where seasonal patterns differ (e.g., student migration in September).
+
+3. **Student mobility correction**: uses MOBSCO commuting flows with per-department blend weights (capped at 0.6). Ile-de-France suburbs have the highest inter-departmental mobility (~50-62%) while university cities (Lyon, Toulouse, Bordeaux, Montpellier) have the lowest (~5-7%). The correction improves EPCI-level accuracy for 15_19 and 20_24 bands but cannot capture individual EPCI-level flows.
+
+4. **Mayotte (976)**: synthesized from quinquennal population estimates, not census microdata. Age distribution uses quinquennal band structure rather than individual-age census counts.
+
+5. **CAGR extension**: beyond the quinquennal data range, population is extended using compound annual growth rates clamped to +/-5%/year. Growth rates are computed from the last 5 years of pipeline output.
+
+### Pass Culture note
+
+The **18-25 age range at EPCI level** is the highest-risk zone for this model:
+- Student mobility is concentrated here (ages 18-24 move for university)
+- Structure-repeats hypothesis is weakest for this age range (high residential turnover)
+- EPCI adds ~3% geographic uncertainty on top of the temporal uncertainty
+- Confidence intervals reflect this: EPCI-level CI = department CI + 3%
+
+### Confidence intervals
+
+All output tables include `confidence_pct`, `population_low`, and `population_high` columns. The confidence percentage grows with distance from the census year and geographic granularity:
+
+| Census offset | Department | EPCI (+3%) | IRIS (+10%) |
+|---------------|-----------|------------|-------------|
+| 0-1 years | 2% | 5% | 12% |
+| 2-3 years | 3% | 6% | 13% |
+| 4+ years | 1% per year | +3% | +10% |
+
+Example: for census year 2022 projecting to 2028 (offset=6), department CI = 6%, EPCI CI = 9%, IRIS CI = 16%.
 
 ### Geographic coverage
 
@@ -107,6 +192,17 @@ The `20_24` band has the highest *median* department-level discrepancy — more 
 
 - EPCI population summed by department is within **5%** of department totals
 - IRIS population summed by department never exceeds department totals by more than **1%**
+
+### Data source catalog
+
+| Source | INSEE page ID | File | Granularity | Update frequency |
+|--------|--------------|------|-------------|-----------------|
+| INDCVI census microdata | [8647104](https://www.insee.fr/fr/statistiques/8647104) | `RP2022_indcvi.parquet` | Person-level, by IRIS/commune/dept | Yearly (latest: 2022) |
+| Quinquennal age pyramid estimates | [8721456](https://www.insee.fr/fr/statistiques/8721456) | `estim-pop-dep-sexe-aq-1975-2026.xlsx` | Dept x 5yr band x sex x year | Annually (1975-2026) |
+| Monthly births by department | [6041515](https://www.insee.fr/fr/statistiques/6041515) | `naissances_dep_decembre_2021.xlsx` | Dept x month | Annually |
+| MOBSCO student commuting | [8589945](https://www.insee.fr/fr/statistiques/8589945) | `RP2022_mobsco.parquet` | Person-level (residence + study commune) | With census |
+| Commune-EPCI correspondence | COG | Via `geo_mappings.py` | Commune level | With COG updates |
+| Population estimates (dept total) | [8721456](https://www.insee.fr/fr/statistiques/8721456) | `estim-pop-dep-sexe-gca-1975-2026.xlsx` | Dept x sex x year | Annually |
 
 ## Quick start
 
@@ -190,6 +286,9 @@ Three parquet files are produced at department, EPCI, and IRIS levels.
 | sex | STRING | Sex (male/female) |
 | geo_precision | STRING | 'exact' |
 | population | FLOAT | Projected population (product of ratios) |
+| confidence_pct | FLOAT | Estimated error margin (0-1), grows with census offset and geographic level |
+| population_low | FLOAT | Lower bound: population * (1 - confidence_pct) |
+| population_high | FLOAT | Upper bound: population * (1 + confidence_pct) |
 
 ### Additional columns by level
 
