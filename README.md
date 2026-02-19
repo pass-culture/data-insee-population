@@ -114,18 +114,6 @@ Comparison of model projections vs official INSEE pyramide data (`donnees_pyrami
 
 The quinquennal estimates are used as-is for band totals (no census replacement). Census data provides only the age-ratio *shape* within each 5-year band. This limits national-level band error to ~1.5%. Individual age errors (up to ~5%) come from cohort-shifted age ratios drifting over time.
 
-#### Improvement from removing census-derived replacement
-
-The model previously replaced quinquennal band totals with census-derived cohort sums. Removing this and trusting quinquennal estimates directly improved accuracy significantly:
-
-| Year | Old model error | Current model error |
-|------|----------------:|--------------------:|
-| 2024 | +1.2% (MAE 2.9%) | +0.2% (MAE 2.9%) |
-| 2025 | +1.8% (MAE 3.8%) | +0.3% (MAE 3.0%) |
-| 2026 | +2.4% (MAE 4.3%) | +0.9% (MAE 2.6%) |
-
-The 20_24 band error dropped from +5.8% to +1.5%, and individual age errors for 20-22 dropped from +7-9% to +2-5%.
-
 ### Census vs quinquennal discrepancy by age band
 
 At the department level, census aggregates and quinquennal estimates disagree for structural reasons (different survey timing, methodology, rounding). The discrepancy varies by age band:
