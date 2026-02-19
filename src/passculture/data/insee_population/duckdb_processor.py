@@ -134,7 +134,7 @@ class PopulationProcessor:
         Each table includes:
         - All geographic columns (department_code, region_code, etc.)
         - geo_precision column indicating data reliability
-        - month, current_date, born_date, decimal_age
+        - month, snapshot_month, born_date, decimal_age
         """
         self._ensure_base_table()
         self._load_geo_mappings()
@@ -292,7 +292,7 @@ class PopulationProcessor:
         """Export a specific level to pandas DataFrame.
 
         Args:
-            level: One of 'department', 'epci', 'iris'
+            level: One of 'department', 'epci', 'canton', 'iris'
         """
         table = f"population_{level}"
         return self._execute(f"SELECT * FROM {table}").df()

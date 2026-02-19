@@ -142,22 +142,40 @@ CI_EXTRA_IRIS = 0.10  # additional uncertainty for IRIS geo_ratio
 # CAGR computed on final projected output extends the series.
 MAX_CAGR_EXTENSION = 10
 
-# BigQuery schema for population table
-POPULATION_SCHEMA = [
-    {"name": "year", "type": "INTEGER", "description": "Census year"},
+# BigQuery schema for population tables (per geographic level)
+# Common columns shared by all levels
+_COMMON_SCHEMA = [
+    {"name": "year", "type": "INTEGER", "description": "Projection year"},
+    {"name": "month", "type": "INTEGER", "description": "Month (1-12)"},
+    {
+        "name": "snapshot_month",
+        "type": "DATE",
+        "description": "First day of observation month",
+    },
+    {
+        "name": "born_date",
+        "type": "DATE",
+        "description": "January 1 of estimated birth year",
+    },
+    {
+        "name": "decimal_age",
+        "type": "FLOAT",
+        "description": "Age in years derived from snapshot_month and born_date",
+    },
     {
         "name": "department_code",
         "type": "STRING",
         "description": "Department code (2-3 chars)",
     },
     {"name": "region_code", "type": "STRING", "description": "Region code"},
-    {"name": "commune_code", "type": "STRING", "description": "Commune INSEE code"},
-    {"name": "iris_code", "type": "STRING", "description": "IRIS code (9 chars)"},
-    {"name": "epci_code", "type": "STRING", "description": "EPCI SIREN code"},
-    {"name": "epci_name", "type": "STRING", "description": "EPCI name"},
     {"name": "age", "type": "INTEGER", "description": "Age in completed years (0-120)"},
     {"name": "sex", "type": "STRING", "description": "Sex (male/female)"},
-    {"name": "population", "type": "INTEGER", "description": "Population count"},
+    {
+        "name": "geo_precision",
+        "type": "STRING",
+        "description": "Geographic precision indicator",
+    },
+    {"name": "population", "type": "FLOAT", "description": "Population estimate"},
     {
         "name": "confidence_pct",
         "type": "FLOAT",
@@ -174,3 +192,37 @@ POPULATION_SCHEMA = [
         "description": "Population upper bound (population * (1 + confidence_pct))",
     },
 ]
+
+# Per-level schemas matching SQL output column order
+POPULATION_SCHEMA_DEPARTMENT = list(_COMMON_SCHEMA)
+
+POPULATION_SCHEMA_EPCI = [
+    *_COMMON_SCHEMA[:7],  # up to region_code
+    {"name": "epci_code", "type": "STRING", "description": "EPCI SIREN code"},
+    *_COMMON_SCHEMA[7:],  # age onward
+]
+
+POPULATION_SCHEMA_CANTON = [
+    *_COMMON_SCHEMA[:7],  # up to region_code
+    {"name": "canton_code", "type": "STRING", "description": "Canton code"},
+    *_COMMON_SCHEMA[7:],  # age onward
+]
+
+POPULATION_SCHEMA_IRIS = [
+    *_COMMON_SCHEMA[:7],  # up to region_code
+    {"name": "epci_code", "type": "STRING", "description": "EPCI SIREN code"},
+    {"name": "commune_code", "type": "STRING", "description": "Commune INSEE code"},
+    {"name": "iris_code", "type": "STRING", "description": "IRIS code (9 chars)"},
+    *_COMMON_SCHEMA[7:],  # age onward
+]
+
+# Lookup dict for bigquery.py
+POPULATION_SCHEMAS = {
+    "department": POPULATION_SCHEMA_DEPARTMENT,
+    "epci": POPULATION_SCHEMA_EPCI,
+    "canton": POPULATION_SCHEMA_CANTON,
+    "iris": POPULATION_SCHEMA_IRIS,
+}
+
+# Backward-compatible alias (most complete schema)
+POPULATION_SCHEMA = POPULATION_SCHEMA_IRIS
