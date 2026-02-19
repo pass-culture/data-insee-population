@@ -412,7 +412,7 @@ class TestMultiYearProjection:
         required_cols = {
             "year",
             "month",
-            "current_date",
+            "snapshot_month",
             "born_date",
             "decimal_age",
             "department_code",
@@ -473,14 +473,14 @@ class TestMultiYearProjection:
         project_multi_year(projection_processor.conn, 15, 20)
 
         result = projection_processor.to_pandas("department")
-        # For year=2022, age=18, month=3: born_date = 2004-03-01
+        # For year=2022, age=18, month=3: born_date = 2004-01-01
         row = result[
             (result["year"] == 2022) & (result["age"] == 18) & (result["month"] == 3)
         ].iloc[0]
         import datetime
 
         born = row["born_date"]
-        assert born == datetime.date(2004, 3, 1) or str(born).startswith("2004-03-01")
+        assert born == datetime.date(2004, 1, 1) or str(born).startswith("2004-01-01")
 
     def test_projected_population_positive(self, projection_processor):
         """Test all projected populations are positive."""

@@ -225,7 +225,7 @@ def info() -> None:
     console.print("    Fine-grained IRIS level - only precise data")
 
     console.print("\n[bold blue]Columns[/bold blue]")
-    console.print("  All levels: year, month, current_date, born_date, decimal_age,")
+    console.print("  All levels: year, month, snapshot_month, born_date, decimal_age,")
     console.print(
         "    department_code, region_code, age, sex, geo_precision, population"
     )

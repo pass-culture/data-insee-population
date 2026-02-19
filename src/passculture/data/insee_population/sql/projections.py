@@ -60,9 +60,10 @@ base_with_fallback AS (
 SELECT
     year,
     month,
-    MAKE_DATE(year, month, 1) AS current_date,
-    MAKE_DATE(year - age, month, 1) AS born_date,
-    CAST(age AS DOUBLE) + (CAST(month - 1 AS DOUBLE) / 12.0) AS decimal_age,
+    MAKE_DATE(year, month, 1) AS snapshot_month,
+    MAKE_DATE(year - age, 1, 1) AS born_date,
+    DATEDIFF('month', MAKE_DATE(year - age, 1, 1),
+            MAKE_DATE(year, month, 1)) / 12.0 AS decimal_age,
     department_code,
     region_code,
     age,
@@ -104,7 +105,7 @@ WITH age_band_map AS (
 SELECT
     pd.year,
     pd.month,
-    pd.current_date,
+    pd.snapshot_month,
     pd.born_date,
     pd.decimal_age,
     pd.department_code,
@@ -144,7 +145,7 @@ WITH age_band_map AS (
 SELECT
     pd.year,
     pd.month,
-    pd.current_date,
+    pd.snapshot_month,
     pd.born_date,
     pd.decimal_age,
     pd.department_code,
@@ -184,7 +185,7 @@ WITH age_band_map AS (
 SELECT
     pd.year,
     pd.month,
-    pd.current_date,
+    pd.snapshot_month,
     pd.born_date,
     pd.decimal_age,
     gr.department_code,
@@ -254,10 +255,11 @@ extended AS (
     SELECT
         fy.year,
         c.month,
-        MAKE_DATE(fy.year, c.month, 1) AS current_date,
-        MAKE_DATE(fy.year - c.age, c.month, 1) AS born_date,
-        CAST(c.age AS DOUBLE)
-            + (CAST(c.month - 1 AS DOUBLE) / 12.0) AS decimal_age,
+        MAKE_DATE(fy.year, c.month, 1) AS snapshot_month,
+        MAKE_DATE(fy.year - c.age, 1, 1) AS born_date,
+        DATEDIFF('month', MAKE_DATE(fy.year - c.age, 1, 1),
+                MAKE_DATE(fy.year, c.month, 1)) / 12.0
+            AS decimal_age,
         c.department_code,
         c.region_code,
         c.age,
