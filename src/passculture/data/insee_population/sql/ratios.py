@@ -21,7 +21,7 @@ WITH age_band_map AS (
         CASE
             {age_band_cases}
         END AS age_band
-    FROM generate_series(0, 120) AS t(age)
+    FROM generate_series(0, {max_age}) AS t(age)
 ),
 projection_years AS (
     SELECT DISTINCT year FROM quinquennal
@@ -31,7 +31,7 @@ target_ages AS (
         py.year,
         abm.age AS target_age,
         abm.age_band,
-        GREATEST(0, LEAST(120, abm.age + ({census_year} - py.year))) AS census_age
+        GREATEST(0, LEAST({max_age}, abm.age + ({census_year} - py.year))) AS census_age
     FROM projection_years py
     CROSS JOIN age_band_map abm
     WHERE abm.age_band IS NOT NULL
@@ -97,7 +97,7 @@ WITH age_band_map AS (
         CASE
             {age_band_cases}
         END AS age_band
-    FROM generate_series(0, 120) AS t(age)
+    FROM generate_series(0, {max_age}) AS t(age)
 ),
 epci_pop AS (
     SELECT
@@ -109,7 +109,7 @@ epci_pop AS (
     FROM population p
     INNER JOIN commune_epci ce ON p.commune_code = ce.commune_code
     JOIN age_band_map abm ON p.age = abm.age
-    WHERE p.commune_code <> '' AND p.iris_code <> 'ZZZZZZZZZ'
+    WHERE p.commune_code <> '' AND p.iris_code <> '{iris_sentinel_no_geo}'
       AND abm.age_band IS NOT NULL
     GROUP BY p.department_code, ce.epci_code, abm.age_band, p.sex
 ),
@@ -147,7 +147,7 @@ WITH age_band_map AS (
         CASE
             {age_band_cases}
         END AS age_band
-    FROM generate_series(0, 120) AS t(age)
+    FROM generate_series(0, {max_age}) AS t(age)
 ),
 iris_pop AS (
     SELECT
@@ -162,8 +162,8 @@ iris_pop AS (
     FROM population p
     LEFT JOIN commune_epci ce ON p.commune_code = ce.commune_code
     JOIN age_band_map abm ON p.age = abm.age
-    WHERE p.iris_code <> 'ZZZZZZZZZ'
-      AND RIGHT(p.iris_code, 4) <> 'XXXX'
+    WHERE p.iris_code <> '{iris_sentinel_no_geo}'
+      AND RIGHT(p.iris_code, 4) <> '{iris_sentinel_masked_suffix}'
       AND LENGTH(p.iris_code) = 9
       AND abm.age_band IS NOT NULL
     GROUP BY p.department_code, p.region_code, p.commune_code,
@@ -206,7 +206,7 @@ WITH age_band_map AS (
         CASE
             {age_band_cases}
         END AS age_band
-    FROM generate_series(0, 120) AS t(age)
+    FROM generate_series(0, {max_age}) AS t(age)
 ),
 canton_pop AS (
     SELECT

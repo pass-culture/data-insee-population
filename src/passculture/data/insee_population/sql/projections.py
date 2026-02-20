@@ -8,28 +8,29 @@ __all__ = [
     "EXTEND_DEPARTMENT_WITH_CAGR",
 ]
 
-# Project department-level population: quinquennal * age_ratio * month_ratio
+# Project department-level population: quinquennal * age_ratio (* month_ratio)
 # Includes confidence intervals based on census offset.
+# Placeholders {month_select}, {month_factor}, {month_join}, {month_cross_join}
+# control monthly vs yearly mode.
 CREATE_PROJECTED_DEPARTMENT = """
 CREATE OR REPLACE TABLE population_department AS
 WITH base AS (
     SELECT
         q.year,
-        mb.month,
+        {month_select} AS month,
         q.department_code,
         (SELECT DISTINCT region_code FROM population p
          WHERE p.department_code = q.department_code LIMIT 1) AS region_code,
         ar.age,
         q.sex,
-        q.population * ar.age_ratio * mb.month_ratio AS population
+        q.population * ar.age_ratio{month_factor} AS population
     FROM quinquennal q
     JOIN age_ratios ar
         ON q.year = ar.year
         AND q.department_code = ar.department_code
         AND q.sex = ar.sex
         AND q.age_band = ar.age_band
-    JOIN monthly_births mb
-        ON q.department_code = mb.department_code
+    {month_join}
     WHERE ar.age BETWEEN {min_age} AND {max_age}
 ),
 base_with_fallback AS (
@@ -37,18 +38,18 @@ base_with_fallback AS (
     UNION ALL
     SELECT
         q.year,
-        mb.month,
+        {month_select} AS month,
         q.department_code,
         NULL AS region_code,
         ar.age,
         q.sex,
-        q.population * ar.age_ratio * mb.month_ratio AS population
+        q.population * ar.age_ratio{month_factor} AS population
     FROM quinquennal q
     JOIN age_ratios_fallback ar
         ON q.year = ar.year
         AND q.sex = ar.sex
         AND q.age_band = ar.age_band
-    CROSS JOIN (SELECT DISTINCT month, month_ratio FROM monthly_births) mb
+    {month_cross_join}
     WHERE ar.age BETWEEN {min_age} AND {max_age}
       AND q.department_code NOT IN (SELECT DISTINCT department_code FROM age_ratios)
       AND q.department_code IN (
@@ -87,20 +88,20 @@ SELECT
     END) AS population_high
 FROM base_with_fallback
 WHERE population > 0
-ORDER BY year, month, department_code, age, sex
 """
 
-# Project EPCI-level population: department projection * geo_ratio
-# EPCI adds extra geographic uncertainty to confidence intervals.
-CREATE_PROJECTED_EPCI = """
-CREATE OR REPLACE TABLE population_epci AS
+# Template for geo-level population projection: department projection * geo_ratio.
+# Parameterized by level name, geo columns, and CI extra placeholder.
+# Uses {{ }} for runtime placeholders (age_band_cases, ci_extra_{level}).
+_PROJECTED_GEO_TEMPLATE = """
+CREATE OR REPLACE TABLE population_{level} AS
 WITH age_band_map AS (
     SELECT
         age,
         CASE
-            {age_band_cases}
+            {{age_band_cases}}
         END AS age_band
-    FROM generate_series(0, 120) AS t(age)
+    FROM generate_series(0, {{max_age}}) AS t(age)
 )
 SELECT
     pd.year,
@@ -108,109 +109,49 @@ SELECT
     pd.snapshot_month,
     pd.born_date,
     pd.decimal_age,
-    pd.department_code,
+    {geo_columns}
+    pd.age,
+    pd.sex,
+    'exact' AS geo_precision,
+    pd.population * gr.geo_ratio AS population,
+    pd.confidence_pct + {{ci_extra_{level}}} AS confidence_pct,
+    pd.population * gr.geo_ratio * (1.0 - (pd.confidence_pct + {{ci_extra_{level}}}))
+        AS population_low,
+    pd.population * gr.geo_ratio * (1.0 + (pd.confidence_pct + {{ci_extra_{level}}}))
+        AS population_high
+FROM population_department pd
+JOIN age_band_map abm ON pd.age = abm.age
+JOIN geo_ratios_{level} gr
+    ON pd.department_code = gr.department_code
+    AND abm.age_band = gr.age_band
+    AND pd.sex = gr.sex
+WHERE pd.population * gr.geo_ratio > 0
+"""
+
+# Generate geo-level projection SQL from template.
+# The geo_columns differ per level to match each ratio table's column set.
+CREATE_PROJECTED_EPCI = _PROJECTED_GEO_TEMPLATE.format(
+    level="epci",
+    geo_columns="""pd.department_code,
     pd.region_code,
-    gr.epci_code,
-    pd.age,
-    pd.sex,
-    'exact' AS geo_precision,
-    pd.population * gr.geo_ratio AS population,
-    pd.confidence_pct + {ci_extra_epci} AS confidence_pct,
-    pd.population * gr.geo_ratio * (1.0 - (pd.confidence_pct + {ci_extra_epci}))
-        AS population_low,
-    pd.population * gr.geo_ratio * (1.0 + (pd.confidence_pct + {ci_extra_epci}))
-        AS population_high
-FROM population_department pd
-JOIN age_band_map abm ON pd.age = abm.age
-JOIN geo_ratios_epci gr
-    ON pd.department_code = gr.department_code
-    AND abm.age_band = gr.age_band
-    AND pd.sex = gr.sex
-WHERE pd.population * gr.geo_ratio > 0
-ORDER BY pd.year, pd.month, gr.epci_code, pd.age, pd.sex
-"""
-
-# Project canton-level population: department projection * geo_ratio
-# Canton adds geographic uncertainty between EPCI and IRIS levels.
-CREATE_PROJECTED_CANTON = """
-CREATE OR REPLACE TABLE population_canton AS
-WITH age_band_map AS (
-    SELECT
-        age,
-        CASE
-            {age_band_cases}
-        END AS age_band
-    FROM generate_series(0, 120) AS t(age)
+    gr.epci_code,""",
 )
-SELECT
-    pd.year,
-    pd.month,
-    pd.snapshot_month,
-    pd.born_date,
-    pd.decimal_age,
-    pd.department_code,
+
+CREATE_PROJECTED_CANTON = _PROJECTED_GEO_TEMPLATE.format(
+    level="canton",
+    geo_columns="""pd.department_code,
     gr.region_code,
-    gr.canton_code,
-    pd.age,
-    pd.sex,
-    'exact' AS geo_precision,
-    pd.population * gr.geo_ratio AS population,
-    pd.confidence_pct + {ci_extra_canton} AS confidence_pct,
-    pd.population * gr.geo_ratio * (1.0 - (pd.confidence_pct + {ci_extra_canton}))
-        AS population_low,
-    pd.population * gr.geo_ratio * (1.0 + (pd.confidence_pct + {ci_extra_canton}))
-        AS population_high
-FROM population_department pd
-JOIN age_band_map abm ON pd.age = abm.age
-JOIN geo_ratios_canton gr
-    ON pd.department_code = gr.department_code
-    AND abm.age_band = gr.age_band
-    AND pd.sex = gr.sex
-WHERE pd.population * gr.geo_ratio > 0
-ORDER BY pd.year, pd.month, gr.canton_code, pd.age, pd.sex
-"""
-
-# Project IRIS-level population: department projection * geo_ratio
-# IRIS adds the largest geographic uncertainty to confidence intervals.
-CREATE_PROJECTED_IRIS = """
-CREATE OR REPLACE TABLE population_iris AS
-WITH age_band_map AS (
-    SELECT
-        age,
-        CASE
-            {age_band_cases}
-        END AS age_band
-    FROM generate_series(0, 120) AS t(age)
+    gr.canton_code,""",
 )
-SELECT
-    pd.year,
-    pd.month,
-    pd.snapshot_month,
-    pd.born_date,
-    pd.decimal_age,
-    gr.department_code,
+
+CREATE_PROJECTED_IRIS = _PROJECTED_GEO_TEMPLATE.format(
+    level="iris",
+    geo_columns="""gr.department_code,
     gr.region_code,
     gr.epci_code,
     gr.commune_code,
-    gr.iris_code,
-    pd.age,
-    pd.sex,
-    'exact' AS geo_precision,
-    pd.population * gr.geo_ratio AS population,
-    pd.confidence_pct + {ci_extra_iris} AS confidence_pct,
-    pd.population * gr.geo_ratio * (1.0 - (pd.confidence_pct + {ci_extra_iris}))
-        AS population_low,
-    pd.population * gr.geo_ratio * (1.0 + (pd.confidence_pct + {ci_extra_iris}))
-        AS population_high
-FROM population_department pd
-JOIN age_band_map abm ON pd.age = abm.age
-JOIN geo_ratios_iris gr
-    ON pd.department_code = gr.department_code
-    AND abm.age_band = gr.age_band
-    AND pd.sex = gr.sex
-WHERE pd.population * gr.geo_ratio > 0
-ORDER BY pd.year, pd.month, gr.iris_code, pd.age, pd.sex
-"""
+    gr.iris_code,""",
+)
 
 # Extend population_department beyond max_data_year using CAGR computed
 # from the last TREND_YEARS of the *projected* output.
@@ -238,7 +179,7 @@ cagr AS (
     SELECT *,
         CASE
             WHEN first_pop > 0 AND last_pop > 0 THEN
-                GREATEST(-0.05, LEAST(0.05,
+                GREATEST(-{cagr_rate_clamp}, LEAST({cagr_rate_clamp},
                     POWER(last_pop / first_pop,
                           1.0 / ({max_data_year} - {first_trend_year})) - 1
                 ))
@@ -290,5 +231,4 @@ extended AS (
 SELECT * FROM kept
 UNION ALL
 SELECT * FROM extended
-ORDER BY year, month, department_code, age, sex
 """

@@ -4,7 +4,8 @@
  * Zoom-based automatic level transitions:
  *   < 7.5   -> Departments
  *   7.5-10  -> EPCI
- *   >= 10   -> IRIS (auto-loaded per department in viewport)
+ *   9-11    -> Canton (auto-loaded per department in viewport)
+ *   >= 11   -> IRIS (auto-loaded per department in viewport)
  */
 import { query, loadCantonDepartment, loadIrisDepartment } from "../db.js";
 import * as Q from "../queries.js";
@@ -176,6 +177,13 @@ export async function renderExplorer(container) {
         GROUP BY canton_code
         ORDER BY total_population DESC
       `);
+
+      // Departments with too few cantons (e.g. Paris = 1) → skip to IRIS directly
+      if (cantonData.length <= 2) {
+        if (infoEl) infoEl.innerHTML = `<p class="unit-placeholder">Peu de cantons pour le département ${deptCode}, chargement IRIS\u2026</p>`;
+        await handleIrisNeeded(deptCode);
+        return;
+      }
 
       await mapController.loadCanton(deptCode, cantonData);
       activeLevel = "canton";

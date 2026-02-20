@@ -176,12 +176,14 @@ class TestDataProcessing:
     ):
         """Test processing a local parquet file."""
         from passculture.data.insee_population import sql
+        from passculture.data.insee_population.constants import IRIS_SENTINEL_NO_GEO
 
         processor._execute(
             sql.CREATE_BASE_TABLE.format(
                 parquet_path=sample_parquet,
                 where_clause="WHERE CAST(AGEREV AS INT) BETWEEN 0 AND 120",
                 year=2022,
+                iris_sentinel_no_geo=IRIS_SENTINEL_NO_GEO,
             )
         )
         processor._base_table_created = True
@@ -412,6 +414,7 @@ class TestMultiYearProjection:
         required_cols = {
             "year",
             "month",
+            "birth_month",
             "snapshot_month",
             "born_date",
             "decimal_age",
@@ -426,16 +429,18 @@ class TestMultiYearProjection:
         }
         assert required_cols.issubset(set(result.columns))
 
-    def test_projected_department_has_monthly_data(self, projection_processor):
-        """Test projected data has all 12 months."""
+    def test_projected_department_yearly_default(self, projection_processor):
+        """Test yearly mode: month is always 1, birth_month has values 1-12."""
         from passculture.data.insee_population.projections import project_multi_year
 
         self._setup_projection_tables(projection_processor)
         project_multi_year(projection_processor.conn, 15, 20)
 
         result = projection_processor.to_pandas("department")
-        months = sorted(result["month"].unique())
-        assert months == list(range(1, 13))
+        # Yearly mode: only month=1 (January snapshot)
+        assert sorted(result["month"].unique()) == [1]
+        # Birth month should have all 12 values
+        assert sorted(result["birth_month"].unique()) == list(range(1, 13))
 
     def test_projected_department_has_multiple_years(self, projection_processor):
         """Test projected data spans start_year to end_year."""
@@ -450,37 +455,58 @@ class TestMultiYearProjection:
         assert 2023 in years
 
     def test_projected_decimal_age(self, projection_processor):
-        """Test decimal_age is computed correctly."""
+        """Test decimal_age varies with birth_month in yearly mode."""
         from passculture.data.insee_population.projections import project_multi_year
 
         self._setup_projection_tables(projection_processor)
         project_multi_year(projection_processor.conn, 15, 20)
 
         result = projection_processor.to_pandas("department")
-        # For age=18, month=1: decimal_age = 18 + 0/12 = 18.0
-        row_jan = result[(result["age"] == 18) & (result["month"] == 1)].iloc[0]
-        assert abs(row_jan["decimal_age"] - 18.0) < 0.01
+        # For age=18, birth_month=1, month=1: born 2004-01-01, snapshot 2022-01-01
+        # decimal_age = 216/12 = 18.0
+        row_bm1 = result[
+            (result["age"] == 18)
+            & (result["month"] == 1)
+            & (result["birth_month"] == 1)
+        ].iloc[0]
+        assert abs(row_bm1["decimal_age"] - 18.0) < 0.01
 
-        # For age=18, month=7: decimal_age = 18 + 6/12 = 18.5
-        row_jul = result[(result["age"] == 18) & (result["month"] == 7)].iloc[0]
-        assert abs(row_jul["decimal_age"] - 18.5) < 0.01
+        # For age=18, birth_month=7, month=1: born 2004-07-01, snapshot 2022-01-01
+        # decimal_age = 210/12 = 17.5
+        row_bm7 = result[
+            (result["age"] == 18)
+            & (result["month"] == 1)
+            & (result["birth_month"] == 7)
+        ].iloc[0]
+        assert abs(row_bm7["decimal_age"] - 17.5) < 0.01
 
     def test_projected_born_date(self, projection_processor):
-        """Test born_date is computed correctly."""
+        """Test born_date uses birth_month."""
         from passculture.data.insee_population.projections import project_multi_year
 
         self._setup_projection_tables(projection_processor)
         project_multi_year(projection_processor.conn, 15, 20)
 
         result = projection_processor.to_pandas("department")
-        # For year=2022, age=18, month=3: born_date = 2004-01-01
-        row = result[
-            (result["year"] == 2022) & (result["age"] == 18) & (result["month"] == 3)
-        ].iloc[0]
         import datetime
 
-        born = row["born_date"]
-        assert born == datetime.date(2004, 1, 1) or str(born).startswith("2004-01-01")
+        # For year=2022, age=18, birth_month=1: born_date = 2004-01-01
+        row_bm1 = result[
+            (result["year"] == 2022)
+            & (result["age"] == 18)
+            & (result["birth_month"] == 1)
+        ].iloc[0]
+        born1 = row_bm1["born_date"]
+        assert born1 == datetime.date(2004, 1, 1) or str(born1).startswith("2004-01-01")
+
+        # For year=2022, age=18, birth_month=7: born_date = 2004-07-01
+        row_bm7 = result[
+            (result["year"] == 2022)
+            & (result["age"] == 18)
+            & (result["birth_month"] == 7)
+        ].iloc[0]
+        born7 = row_bm7["born_date"]
+        assert born7 == datetime.date(2004, 7, 1) or str(born7).startswith("2004-07-01")
 
     def test_projected_population_positive(self, projection_processor):
         """Test all projected populations are positive."""
@@ -531,6 +557,157 @@ class TestMultiYearProjection:
 
         # IRIS should be <= department (not all geo can be mapped)
         assert iris_pop <= dept_pop * 1.01  # allow tiny floating point rounding
+
+    def test_monthly_flag_produces_12_snapshots(self, projection_processor):
+        """With monthly=True, month column should have values 1-12."""
+        from passculture.data.insee_population.projections import project_multi_year
+
+        self._setup_projection_tables(projection_processor)
+        project_multi_year(projection_processor.conn, 15, 20, monthly=True)
+
+        result = projection_processor.to_pandas("department")
+        months = sorted(result["month"].unique())
+        assert months == list(range(1, 13))
+        # birth_month should also be present
+        birth_months = sorted(result["birth_month"].unique())
+        assert birth_months == list(range(1, 13))
+
+    def test_birth_month_population_sum_preserved(self, projection_processor):
+        """Sum across birth_months should equal the annual quinquennal total."""
+        from passculture.data.insee_population.projections import project_multi_year
+
+        self._setup_projection_tables(projection_processor)
+        project_multi_year(projection_processor.conn, 15, 20)
+
+        # In yearly mode, sum of population across all birth_months for a
+        # given year/dept/age/sex should equal quinquennal * age_ratio
+        # (since month_ratios sum to 1)
+        total = projection_processor.conn.execute("""
+            SELECT SUM(population)
+            FROM population_department
+            WHERE year = 2022 AND department_code = '75' AND sex = 'male'
+        """).fetchone()[0]
+
+        quinq_total = projection_processor.conn.execute("""
+            SELECT SUM(population)
+            FROM quinquennal
+            WHERE year = 2022 AND department_code = '75' AND sex = 'male'
+        """).fetchone()[0]
+
+        assert abs(total - quinq_total) < 1.0, (
+            f"Birth-month sum ({total:.1f}) should equal "
+            f"quinquennal ({quinq_total:.1f})"
+        )
+
+    def test_birth_month_column_always_present(self, projection_processor):
+        """birth_month column exists in all geographic levels."""
+        from passculture.data.insee_population.projections import project_multi_year
+
+        self._setup_projection_tables(projection_processor)
+        project_multi_year(projection_processor.conn, 15, 20)
+
+        for level in ["department", "epci", "canton", "iris"]:
+            result = projection_processor.to_pandas(level)
+            assert "birth_month" in result.columns, f"birth_month missing from {level}"
+
+    def test_yearly_exported_population_equals_quinquennal(self, projection_processor):
+        """In yearly mode, SUM(exported pop) per band must equal quinquennal input.
+
+        The birth-month expansion (x12 rows) uses month_ratio which sums to 1,
+        so total population is preserved.
+        """
+        from passculture.data.insee_population.projections import project_multi_year
+
+        self._setup_projection_tables(projection_processor)
+        project_multi_year(projection_processor.conn, 15, 20)
+
+        exported = projection_processor.to_pandas("department")
+        # Sum across all birth_months for year=2022, dept=75, male
+        total = exported[
+            (exported["year"] == 2022)
+            & (exported["department_code"] == "75")
+            & (exported["sex"] == "male")
+        ]["population"].sum()
+
+        quinq_total = projection_processor.conn.execute("""
+            SELECT SUM(population) FROM quinquennal
+            WHERE year = 2022 AND department_code = '75' AND sex = 'male'
+        """).fetchone()[0]
+
+        assert abs(total - quinq_total) < 1.0, (
+            f"Exported population ({total:.1f}) != quinquennal ({quinq_total:.1f})"
+        )
+
+    def test_monthly_snapshot_population_is_full_stock(self, projection_processor):
+        """In monthly mode, each snapshot month's total must equal the annual stock.
+
+        Population is a stock variable — the number of 18-year-olds in January
+        is the same as in July. month_ratio only splits birth-month sub-cohorts,
+        it must NOT reduce the snapshot total.
+
+        Regression: before fix, month_ratio was applied twice in monthly mode
+        (once during projection, once at export), giving 1/12 of expected values.
+        """
+        from passculture.data.insee_population.projections import project_multi_year
+
+        self._setup_projection_tables(projection_processor)
+        project_multi_year(projection_processor.conn, 15, 20, monthly=True)
+
+        exported = projection_processor.to_pandas("department")
+
+        quinq_total = projection_processor.conn.execute("""
+            SELECT SUM(population) FROM quinquennal
+            WHERE year = 2022 AND department_code = '75' AND sex = 'male'
+        """).fetchone()[0]
+
+        # Check EACH snapshot month individually
+        for month in range(1, 13):
+            month_total = exported[
+                (exported["year"] == 2022)
+                & (exported["month"] == month)
+                & (exported["department_code"] == "75")
+                & (exported["sex"] == "male")
+            ]["population"].sum()
+
+            assert abs(month_total - quinq_total) < 1.0, (
+                f"Month {month}: exported pop ({month_total:.1f}) != "
+                f"quinquennal stock ({quinq_total:.1f}). "
+                f"Ratio: {month_total / quinq_total:.4f}"
+            )
+
+    def test_monthly_and_yearly_same_per_snapshot_total(self, projection_processor):
+        """Monthly and yearly modes must produce the same total per snapshot month.
+
+        Yearly mode has 1 snapshot (Jan) with 12 birth_month rows.
+        Monthly mode has 12 snapshots, each with 12 birth_month rows.
+        Per-snapshot totals should be identical.
+        """
+        from passculture.data.insee_population.projections import project_multi_year
+
+        # Yearly mode
+        self._setup_projection_tables(projection_processor)
+        project_multi_year(projection_processor.conn, 15, 20, monthly=False)
+        yearly_exported = projection_processor.to_pandas("department")
+        yearly_jan = yearly_exported[
+            (yearly_exported["year"] == 2022)
+            & (yearly_exported["month"] == 1)
+            & (yearly_exported["department_code"] == "75")
+            & (yearly_exported["sex"] == "male")
+        ]["population"].sum()
+
+        # Monthly mode (re-run projection)
+        project_multi_year(projection_processor.conn, 15, 20, monthly=True)
+        monthly_exported = projection_processor.to_pandas("department")
+        monthly_jan = monthly_exported[
+            (monthly_exported["year"] == 2022)
+            & (monthly_exported["month"] == 1)
+            & (monthly_exported["department_code"] == "75")
+            & (monthly_exported["sex"] == "male")
+        ]["population"].sum()
+
+        assert abs(yearly_jan - monthly_jan) < 1.0, (
+            f"Yearly Jan ({yearly_jan:.1f}) != Monthly Jan ({monthly_jan:.1f})"
+        )
 
 
 # -----------------------------------------------------------------------------
@@ -701,16 +878,18 @@ class TestAgeRatios:
         project_multi_year(processor.conn, 1, 25)
 
         dept_df = processor.to_pandas("department")
-        # Compare population of age 24 and age 25 (both in same month/year)
+        # Compare population of age 24 and age 25 (same month/year/birth_month)
         mask_24 = (
             (dept_df["age"] == 24)
             & (dept_df["month"] == 1)
+            & (dept_df["birth_month"] == 1)
             & (dept_df["sex"] == "male")
         )
         pop_24 = dept_df[mask_24]["population"].iloc[0]
         mask_25 = (
             (dept_df["age"] == 25)
             & (dept_df["month"] == 1)
+            & (dept_df["birth_month"] == 1)
             & (dept_df["sex"] == "male")
         )
         pop_25 = dept_df[mask_25]["population"].iloc[0]

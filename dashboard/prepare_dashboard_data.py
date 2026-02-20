@@ -6,7 +6,6 @@ Run with: uv run python dashboard/prepare_dashboard_data.py
 """
 
 import json
-import shutil
 from pathlib import Path
 
 import duckdb
@@ -45,7 +44,12 @@ CANTON_GEOJSON_API = (
 
 
 def copy_parquet():
-    """Copy department and EPCI parquet files."""
+    """Copy department, EPCI and canton parquet files (January snapshot only).
+
+    Filters to month = 1 so the dashboard always shows yearly data
+    regardless of whether the CLI was run with --monthly or not.
+    """
+    conn = duckdb.connect()
     for name in [
         "population_department.parquet",
         "population_epci.parquet",
@@ -56,12 +60,20 @@ def copy_parquet():
         if not src.exists():
             print(f"  SKIP {name} (not found)")
             continue
-        shutil.copy2(src, dst)
+        conn.execute(
+            f"""
+            COPY (
+                SELECT * FROM read_parquet('{src}')
+                WHERE month = 1
+            ) TO '{dst}' (FORMAT PARQUET)
+            """
+        )
         print(f"  Copied {name} ({dst.stat().st_size / 1e6:.1f} MB)")
+    conn.close()
 
 
 def split_iris():
-    """Split IRIS parquet by department."""
+    """Split IRIS parquet by department (January snapshot only)."""
     iris_file = DATA_INPUT / "population_iris.parquet"
     if not iris_file.exists():
         print("  SKIP population_iris.parquet (not found)")
@@ -87,6 +99,7 @@ def split_iris():
             COPY (
                 SELECT * FROM read_parquet('{iris_file}')
                 WHERE department_code = '{dept_code}'
+                  AND month = 1
             ) TO '{out_path}' (FORMAT PARQUET)
             """
         )
@@ -97,7 +110,7 @@ def split_iris():
 
 
 def split_canton():
-    """Split canton parquet by department."""
+    """Split canton parquet by department (January snapshot only)."""
     canton_file = DATA_INPUT / "population_canton.parquet"
     if not canton_file.exists():
         print("  SKIP population_canton.parquet (not found)")
@@ -122,6 +135,7 @@ def split_canton():
             COPY (
                 SELECT * FROM read_parquet('{canton_file}')
                 WHERE department_code = '{dept_code}'
+                  AND month = 1
             ) TO '{out_path}' (FORMAT PARQUET)
             """
         )

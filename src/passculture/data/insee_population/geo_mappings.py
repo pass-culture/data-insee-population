@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pandas as pd
 import requests
+from loguru import logger
 
 # API endpoints
 GEO_API_COMMUNES_URL = "https://geo.api.gouv.fr/communes?fields=code,nom,codeDepartement,codeEpci,population&format=json"
@@ -47,7 +48,7 @@ def download_commune_epci_mapping(cache_dir: Path | None = None) -> pd.DataFrame
         if cache_path.exists():
             return pd.read_parquet(cache_path)
 
-    print("Downloading commune → EPCI mapping from geo.api.gouv.fr...")
+    logger.info("Downloading commune -> EPCI mapping from geo.api.gouv.fr...")
     response = requests.get(GEO_API_COMMUNES_URL, timeout=DOWNLOAD_TIMEOUT)
     response.raise_for_status()
 
@@ -83,7 +84,10 @@ def download_commune_epci_mapping(cache_dir: Path | None = None) -> pd.DataFrame
     )
     df = pd.concat([df, arrondissements], ignore_index=True)
 
-    print(f"  Loaded {len(df)} communes with EPCI mapping (including arrondissements)")
+    logger.debug(
+        "  Loaded {} communes with EPCI mapping (including arrondissements)",
+        len(df),
+    )
 
     if cache_dir:
         cache_dir.mkdir(parents=True, exist_ok=True)
@@ -106,10 +110,10 @@ def download_canton_epci_weights(cache_dir: Path | None = None) -> pd.DataFrame:
         if cache_path.exists():
             return pd.read_parquet(cache_path)
 
-    print("Building canton → EPCI weights...")
+    logger.info("Building canton -> EPCI weights...")
 
     # Get COG with canton codes
-    print("  Downloading COG communes...")
+    logger.info("  Downloading COG communes...")
     cog = pd.read_csv(COG_COMMUNES_URL, dtype=str)
     cog = cog[["COM", "DEP", "CAN"]].rename(
         columns={
@@ -155,7 +159,7 @@ def download_canton_epci_weights(cache_dir: Path | None = None) -> pd.DataFrame:
 
     n_cantons = result["canton_code"].nunique()
     n_epcis = result["epci_code"].nunique()
-    print(f"  Built weights for {n_cantons} cantons -> {n_epcis} EPCIs")
+    logger.debug("  Built weights for {} cantons -> {} EPCIs", n_cantons, n_epcis)
 
     if cache_dir:
         cache_dir.mkdir(parents=True, exist_ok=True)

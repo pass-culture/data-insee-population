@@ -38,6 +38,9 @@ BIRTH_DATA_URLS = {
     "by_dept_year": "https://www.insee.fr/fr/statistiques/fichier/2381380/T_nais_dep.xlsx",
     # Births by department and month (for monthly distribution)
     "by_dept_month": "https://www.insee.fr/fr/statistiques/fichier/2381380/T_nais_dep_mois.xlsx",
+    # Monthly births by department of residence (2 years per file)
+    # Source: https://www.insee.fr/fr/statistiques/6041515?sommaire=5348638
+    "by_month_dept": "https://www.insee.fr/fr/statistiques/fichier/6041515/naissances_dep_decembre_2021.xlsx",
 }
 
 # Official reference populations ("populations légales") for validation
@@ -64,13 +67,6 @@ STUDENT_MOBILITY_BLEND_CAP = 0.6
 # Better for validating specific age ranges like 15-20
 # Contains columns for each 5-year age group: 0-4, 5-9, 10-14, 15-19, 20-24, etc.
 AGE_PYRAMID_URL = "https://www.insee.fr/fr/statistiques/fichier/8721456/estim-pop-dep-sexe-aq-1975-2026.xlsx"
-
-# Birth data by department and month
-# Source: https://www.insee.fr/fr/statistiques/6041515?sommaire=5348638
-# File: monthly births by department of residence, 2 years per file
-BIRTH_DATA_URLS = {
-    "by_month_dept": "https://www.insee.fr/fr/statistiques/fichier/6041515/naissances_dep_decembre_2021.xlsx",
-}
 
 # Columns to extract from INDCVI files
 INDCVI_COLUMNS = [
@@ -142,11 +138,33 @@ CI_EXTRA_IRIS = 0.10  # additional uncertainty for IRIS geo_ratio
 # CAGR computed on final projected output extends the series.
 MAX_CAGR_EXTENSION = 10
 
+# Age bands affected by student mobility correction (MOBSCO)
+STUDENT_AGE_BANDS = ("15_19", "20_24")
+
+# IRIS sentinel values in INDCVI census data
+IRIS_SENTINEL_NO_GEO = "ZZZZZZZZZ"  # commune has no IRIS coverage
+IRIS_SENTINEL_MASKED_SUFFIX = "XXXX"  # IRIS masked (< 200 inhabitants)
+
+# Maximum individual age in census data (AGEREV 0-120)
+MAX_AGE = 120
+
+# CAGR rate clamp: cap annual growth rate to +/-5% to avoid extrapolation blow-up
+CAGR_RATE_CLAMP = 0.05
+
 # BigQuery schema for population tables (per geographic level)
 # Common columns shared by all levels
 _COMMON_SCHEMA = [
     {"name": "year", "type": "INTEGER", "description": "Projection year"},
-    {"name": "month", "type": "INTEGER", "description": "Month (1-12)"},
+    {
+        "name": "month",
+        "type": "INTEGER",
+        "description": "Snapshot month (1-12, or 1 in yearly mode)",
+    },
+    {
+        "name": "birth_month",
+        "type": "INTEGER",
+        "description": "Estimated birth month (1-12)",
+    },
     {
         "name": "snapshot_month",
         "type": "DATE",
@@ -155,7 +173,7 @@ _COMMON_SCHEMA = [
     {
         "name": "born_date",
         "type": "DATE",
-        "description": "January 1 of estimated birth year",
+        "description": "First day of estimated birth month/year",
     },
     {
         "name": "decimal_age",
@@ -197,23 +215,23 @@ _COMMON_SCHEMA = [
 POPULATION_SCHEMA_DEPARTMENT = list(_COMMON_SCHEMA)
 
 POPULATION_SCHEMA_EPCI = [
-    *_COMMON_SCHEMA[:7],  # up to region_code
+    *_COMMON_SCHEMA[:8],  # up to region_code
     {"name": "epci_code", "type": "STRING", "description": "EPCI SIREN code"},
-    *_COMMON_SCHEMA[7:],  # age onward
+    *_COMMON_SCHEMA[8:],  # age onward
 ]
 
 POPULATION_SCHEMA_CANTON = [
-    *_COMMON_SCHEMA[:7],  # up to region_code
+    *_COMMON_SCHEMA[:8],  # up to region_code
     {"name": "canton_code", "type": "STRING", "description": "Canton code"},
-    *_COMMON_SCHEMA[7:],  # age onward
+    *_COMMON_SCHEMA[8:],  # age onward
 ]
 
 POPULATION_SCHEMA_IRIS = [
-    *_COMMON_SCHEMA[:7],  # up to region_code
+    *_COMMON_SCHEMA[:8],  # up to region_code
     {"name": "epci_code", "type": "STRING", "description": "EPCI SIREN code"},
     {"name": "commune_code", "type": "STRING", "description": "Commune INSEE code"},
     {"name": "iris_code", "type": "STRING", "description": "IRIS code (9 chars)"},
-    *_COMMON_SCHEMA[7:],  # age onward
+    *_COMMON_SCHEMA[8:],  # age onward
 ]
 
 # Lookup dict for bigquery.py

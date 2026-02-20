@@ -15,12 +15,15 @@ from pathlib import Path
 
 import pandas as pd
 import requests
+from loguru import logger
+from rich.progress import Progress
 
 from passculture.data.insee_population.constants import (
     AGE_BUCKETS,
     AGE_PYRAMID_URL,
     BIRTH_DATA_URLS,
     INDCVI_URLS,
+    IRIS_SENTINEL_NO_GEO,
     MOBSCO_URL,
     POPULATION_ESTIMATES_URL,
 )
@@ -53,7 +56,7 @@ def download_indcvi(year: int, cache_dir: Path | None) -> Path:
         parquet_path = cache_dir / f"indcvi_{year}.parquet"
 
         if parquet_path.exists():
-            print(f"Using cached: {parquet_path}")
+            logger.debug("Using cached: {}", parquet_path)
             return parquet_path
 
         _download_file(url, parquet_path)
@@ -79,7 +82,7 @@ def download_mobsco(cache_dir: Path | None) -> Path:
         parquet_path = cache_dir / "mobsco_2022.parquet"
 
         if parquet_path.exists():
-            print(f"Using cached: {parquet_path}")
+            logger.debug("Using cached: {}", parquet_path)
             return parquet_path
 
         _download_file(MOBSCO_URL, parquet_path)
@@ -106,14 +109,16 @@ def download_estimates(
     """
     cache_path = cache_dir / "population_estimates.parquet" if cache_dir else None
     if cache_path and cache_path.exists():
-        print(f"Using cached estimates: {cache_path}")
+        logger.debug("Using cached estimates: {}", cache_path)
         df = pd.read_parquet(cache_path)
         if extrapolate_to and extrapolate_to > df["year"].max():
-            df = _extrapolate_estimates(df, df["year"].max(), extrapolate_to)
+            df = _extrapolate_last_year(
+                df, df["year"].max(), extrapolate_to, "estimates"
+            )
         return df
 
     try:
-        print(f"Downloading estimates from {POPULATION_ESTIMATES_URL}")
+        logger.info("Downloading estimates from {}", POPULATION_ESTIMATES_URL)
         response = requests.get(POPULATION_ESTIMATES_URL, timeout=ESTIMATES_TIMEOUT)
         response.raise_for_status()
 
@@ -139,12 +144,14 @@ def download_estimates(
             df.to_parquet(cache_path, index=False)
 
         if extrapolate_to and extrapolate_to > max_available_year:
-            df = _extrapolate_estimates(df, max_available_year, extrapolate_to)
+            df = _extrapolate_last_year(
+                df, max_available_year, extrapolate_to, "estimates"
+            )
 
         return df
 
     except Exception as e:
-        print(f"Warning: Could not download estimates: {e}")
+        logger.warning("Could not download estimates: {}", e)
         return pd.DataFrame()
 
 
@@ -159,7 +166,7 @@ def download_birth_data() -> pd.DataFrame:
         return pd.DataFrame()
 
     try:
-        print(f"Downloading birth data from {url}")
+        logger.info("Downloading birth data from {}", url)
         response = requests.get(url, timeout=ESTIMATES_TIMEOUT)
         response.raise_for_status()
 
@@ -172,7 +179,7 @@ def download_birth_data() -> pd.DataFrame:
         return _parse_birth_data(df)
 
     except Exception as e:
-        print(f"Warning: Could not download birth data: {e}")
+        logger.warning("Could not download birth data: {}", e)
         return pd.DataFrame()
 
 
@@ -196,13 +203,13 @@ def download_quinquennal_estimates(
     """
     cache_path = cache_dir / "quinquennal_estimates.parquet" if cache_dir else None
     if cache_path and cache_path.exists():
-        print(f"Using cached quinquennal estimates: {cache_path}")
+        logger.debug("Using cached quinquennal estimates: {}", cache_path)
         df = pd.read_parquet(cache_path)
         if end_year > df["year"].max():
-            df = _extrapolate_quinquennal(df, df["year"].max(), end_year)
+            df = _extrapolate_last_year(df, df["year"].max(), end_year, "quinquennal")
         return df[(df["year"] >= start_year) & (df["year"] <= end_year)]
 
-    print(f"Downloading quinquennal age pyramid from {AGE_PYRAMID_URL}")
+    logger.info("Downloading quinquennal age pyramid from {}", AGE_PYRAMID_URL)
     response = requests.get(AGE_PYRAMID_URL, timeout=ESTIMATES_TIMEOUT)
     response.raise_for_status()
 
@@ -218,13 +225,13 @@ def download_quinquennal_estimates(
         results.extend(_parse_quinquennal_sheet(xls, sheet_name, year))
 
     if not results:
-        print("Warning: No quinquennal data parsed")
+        logger.warning("No quinquennal data parsed")
         return pd.DataFrame()
 
     df = pd.DataFrame(results)
 
     if end_year > max_available_year:
-        df = _extrapolate_quinquennal(df, max_available_year, end_year)
+        df = _extrapolate_last_year(df, max_available_year, end_year, "quinquennal")
 
     if cache_path and cache_dir:
         cache_dir.mkdir(parents=True, exist_ok=True)
@@ -249,16 +256,16 @@ def download_monthly_birth_distribution(
     """
     cache_path = cache_dir / "monthly_birth_distribution.parquet" if cache_dir else None
     if cache_path and cache_path.exists():
-        print(f"Using cached monthly birth distribution: {cache_path}")
+        logger.debug("Using cached monthly birth distribution: {}", cache_path)
         return pd.read_parquet(cache_path)
 
     url = BIRTH_DATA_URLS.get("by_dept_month") or BIRTH_DATA_URLS.get("by_month_dept")
     if not url:
-        print("Warning: No birth-by-month URL configured")
+        logger.warning("No birth-by-month URL configured")
         return pd.DataFrame()
 
     try:
-        print(f"Downloading birth data by month from {url}")
+        logger.info("Downloading birth data by month from {}", url)
         response = requests.get(url, timeout=ESTIMATES_TIMEOUT)
         response.raise_for_status()
 
@@ -275,7 +282,7 @@ def download_monthly_birth_distribution(
         return df
 
     except Exception as e:
-        print(f"Warning: Could not download monthly birth data: {e}")
+        logger.warning("Could not download monthly birth data: {}", e)
         return pd.DataFrame()
 
 
@@ -286,23 +293,18 @@ def download_monthly_birth_distribution(
 
 def _download_file(url: str, dest: Path) -> None:
     """Download file with progress indicator."""
-    print(f"Downloading from {url}...")
+    logger.info("Downloading from {}...", url)
     response = requests.get(url, stream=True, timeout=DOWNLOAD_TIMEOUT)
     response.raise_for_status()
 
     total = int(response.headers.get("content-length", 0))
-    downloaded = 0
 
-    with open(dest, "wb") as f:
-        for chunk in response.iter_content(chunk_size=CHUNK_SIZE):
-            f.write(chunk)
-            downloaded += len(chunk)
-            if total > 0:
-                pct = downloaded * 100 // total
-                mb = downloaded // 1024 // 1024
-                print(f"\rDownloading: {pct}% ({mb}MB)", end="", flush=True)
-
-    print()
+    with Progress(transient=True) as progress:
+        task = progress.add_task("Downloading", total=total or None)
+        with open(dest, "wb") as f:
+            for chunk in response.iter_content(chunk_size=CHUNK_SIZE):
+                f.write(chunk)
+                progress.advance(task, len(chunk))
 
 
 def _parse_estimates_sheet(xls: pd.ExcelFile, sheet_name: str, year: int) -> list[dict]:
@@ -383,11 +385,23 @@ def _parse_birth_data(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(results)
 
 
-def _extrapolate_estimates(
-    df: pd.DataFrame, last_year: int, target_year: int
+def _extrapolate_last_year(
+    df: pd.DataFrame, last_year: int, target_year: int, label: str
 ) -> pd.DataFrame:
-    """Repeat last year of estimates for years beyond available range."""
-    print(f"Extending estimates with last known year ({last_year}) to {target_year}...")
+    """Repeat last year of data for years beyond available range.
+
+    Args:
+        df: DataFrame with a 'year' column
+        last_year: Last available year in the data
+        target_year: Year to extend to
+        label: Human-readable label for the print message (e.g. "estimates")
+    """
+    logger.info(
+        "Extending {} with last known year ({}) to {}...",
+        label,
+        last_year,
+        target_year,
+    )
 
     last_year_data = df[df["year"] == last_year]
     if last_year_data.empty:
@@ -461,35 +475,6 @@ def _parse_quinquennal_sheet(
             continue
 
     return results
-
-
-def _extrapolate_quinquennal(
-    df: pd.DataFrame, last_year: int, target_year: int
-) -> pd.DataFrame:
-    """Repeat the last year of quinquennal data for years beyond available range.
-
-    This provides a flat baseline so the pipeline can produce rows for all
-    requested years.  The actual CAGR extension is applied post-pipeline
-    on the final projected output (see projections.extend_with_cagr).
-    """
-    print(
-        f"Extending quinquennal with last known year ({last_year}) to {target_year}..."
-    )
-
-    last_year_data = df[df["year"] == last_year]
-    if last_year_data.empty:
-        return df
-
-    extended = []
-    for year in range(last_year + 1, target_year + 1):
-        year_copy = last_year_data.copy()
-        year_copy["year"] = year
-        extended.append(year_copy)
-
-    if extended:
-        return pd.concat([df, *extended], ignore_index=True)
-
-    return df
 
 
 # Month name mapping for the INSEE birth data Excel files
@@ -584,7 +569,7 @@ def _parse_monthly_birth_excel(xls: pd.ExcelFile) -> pd.DataFrame:
 
     result = avg[["department_code", "month", "month_ratio"]].copy()
     n_depts = result["department_code"].nunique()
-    print(f"  Computed monthly ratios for {n_depts} departments")
+    logger.debug("  Computed monthly ratios for {} departments", n_depts)
     return result
 
 
@@ -616,19 +601,19 @@ def synthesize_mayotte_population(
     Returns:
         DataFrame with Mayotte population rows ready for insertion
     """
-    print("Adding Mayotte (976) from population estimates...")
+    logger.info("Adding Mayotte (976) from population estimates...")
 
     # Get age distribution from DOM departments
     dom_age_dist = _get_dom_age_distribution(year, cache_dir)
     if not dom_age_dist:
-        print("  Warning: Could not compute DOM age distribution, skipping Mayotte")
+        logger.warning("  Could not compute DOM age distribution, skipping Mayotte")
         return pd.DataFrame()
 
     # Get Mayotte population estimates
     estimates_df = download_estimates(cache_dir=cache_dir)
     mayotte_estimates = _get_mayotte_estimates(estimates_df, year)
     if mayotte_estimates.empty:
-        print("  Warning: No Mayotte estimates found, skipping")
+        logger.warning("  No Mayotte estimates found, skipping")
         return pd.DataFrame()
 
     # Build population data
@@ -639,7 +624,7 @@ def synthesize_mayotte_population(
     if data:
         df = pd.DataFrame(data)
         total = df["population"].sum()
-        print(f"  Added {len(data)} Mayotte rows ({total:,} population)")
+        logger.debug("  Added {} Mayotte rows ({:,} population)", len(data), total)
         return df
 
     return pd.DataFrame()
@@ -665,7 +650,7 @@ def _get_dom_age_distribution(
 
     source = df[df["department_code"] == "976"]
     if source.empty:
-        print("  Warning: No quinquennal data for Mayotte (976) — skipping")
+        logger.warning("  No quinquennal data for Mayotte (976) -- skipping")
         return {}
 
     # Sum population across sexes per age band
@@ -697,7 +682,7 @@ def _get_mayotte_estimates(estimates_df: pd.DataFrame, year: int) -> pd.DataFram
         if not mayotte.empty:
             closest_year = mayotte["year"].max()
             mayotte = mayotte[mayotte["year"] == closest_year]
-            print(f"  Using estimates from {closest_year} for Mayotte")
+            logger.debug("  Using estimates from {} for Mayotte", closest_year)
 
     return mayotte
 
@@ -726,7 +711,7 @@ def _build_population_rows(
                         "region_code": "06",
                         "canton_code": "9799",  # Mayotte single canton
                         "commune_code": "",
-                        "iris_code": "ZZZZZZZZZ",
+                        "iris_code": IRIS_SENTINEL_NO_GEO,
                         "age": age,
                         "sex": sex,
                         "population": pop,

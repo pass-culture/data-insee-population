@@ -20,7 +20,7 @@ WITH raw_data AS (
         TRIM(REGION) AS region_code,
         TRIM(CANTVILLE) AS canton_code,
         CASE
-            WHEN TRIM(IRIS) = 'ZZZZZZZZZ' OR TRIM(IRIS) IS NULL THEN ''
+            WHEN TRIM(IRIS) = '{iris_sentinel_no_geo}' OR TRIM(IRIS) IS NULL THEN ''
             ELSE LEFT(TRIM(IRIS), 5)
         END AS commune_code,
         TRIM(IRIS) AS iris_code

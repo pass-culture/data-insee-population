@@ -1,5 +1,11 @@
 """Student mobility correction (MOBSCO) templates for EPCI and IRIS."""
 
+from passculture.data.insee_population.constants import (
+    IRIS_SENTINEL_MASKED_SUFFIX,
+    IRIS_SENTINEL_NO_GEO,
+    STUDENT_AGE_BANDS,
+)
+
 __all__ = [
     "CREATE_CORRECTED_GEO_RATIOS_EPCI",
     "CREATE_CORRECTED_GEO_RATIOS_IRIS",
@@ -9,6 +15,11 @@ __all__ = [
     "RENAME_GEO_RATIOS_EPCI_TO_BASE",
     "RENAME_GEO_RATIOS_IRIS_TO_BASE",
 ]
+
+# Build SQL UNION for student age bands from constants
+_STUDENT_BANDS_SQL = "\n    UNION ALL\n    ".join(
+    f"SELECT '{band}' AS age_band" for band in STUDENT_AGE_BANDS
+)
 
 RENAME_GEO_RATIOS_EPCI_TO_BASE = (
     "ALTER TABLE geo_ratios_epci RENAME TO geo_ratios_epci_base"
@@ -121,12 +132,10 @@ JOIN dept_totals dt
 # For bands 15_19 and 20_24: corrected = (1-w)*base + w*study, renormalized.
 # Uses per-department blend weights from the mobility_weights table.
 # Other bands: unchanged from base.
-CREATE_CORRECTED_GEO_RATIOS_EPCI = """
+CREATE_CORRECTED_GEO_RATIOS_EPCI = f"""
 CREATE OR REPLACE TABLE geo_ratios_epci AS
 WITH student_bands AS (
-    SELECT '15_19' AS age_band
-    UNION ALL
-    SELECT '20_24'
+    {_STUDENT_BANDS_SQL}
 ),
 -- Base ratios for non-student bands (pass through unchanged)
 non_student AS (
@@ -199,7 +208,7 @@ RENAME_GEO_RATIOS_IRIS_TO_BASE = (
 # Compute study-destination IRIS distribution from MOBSCO parquet.
 # Distributes commune-level MOBSCO flows to IRIS using census population
 # proportions within each study commune.
-CREATE_STUDENT_FLOWS_IRIS = """
+CREATE_STUDENT_FLOWS_IRIS = f"""
 CREATE OR REPLACE TABLE student_flows_iris AS
 WITH mobsco_raw AS (
     SELECT
@@ -210,7 +219,7 @@ WITH mobsco_raw AS (
         TRIM(DCETUF) AS study_commune,
         CASE SEXE WHEN '1' THEN 'male' WHEN '2' THEN 'female' END AS sex,
         CAST(IPONDI AS DOUBLE) AS weight
-    FROM read_parquet('{mobsco_path}')
+    FROM read_parquet('{{mobsco_path}}')
     WHERE TRIM(AGEREV10) = '18'
 ),
 iris_commune_share AS (
@@ -224,8 +233,8 @@ iris_commune_share AS (
         SUM(SUM(p.population)) OVER (PARTITION BY p.commune_code) AS commune_pop
     FROM population p
     LEFT JOIN commune_epci ce ON p.commune_code = ce.commune_code
-    WHERE p.iris_code <> 'ZZZZZZZZZ'
-      AND RIGHT(p.iris_code, 4) <> 'XXXX'
+    WHERE p.iris_code <> '{IRIS_SENTINEL_NO_GEO}'
+      AND RIGHT(p.iris_code, 4) <> '{IRIS_SENTINEL_MASKED_SUFFIX}'
       AND LENGTH(p.iris_code) = 9
     GROUP BY p.commune_code, p.department_code, p.region_code,
              p.iris_code, ce.epci_code
@@ -269,10 +278,10 @@ JOIN dept_totals dt
 # For bands 15_19 and 20_24: corrected = (1-w)*base + w*study, renormalized.
 # Uses per-department blend weights from the mobility_weights table.
 # Other bands: unchanged from base.
-CREATE_CORRECTED_GEO_RATIOS_IRIS = """
+CREATE_CORRECTED_GEO_RATIOS_IRIS = f"""
 CREATE OR REPLACE TABLE geo_ratios_iris AS
 WITH student_bands AS (
-    SELECT '15_19' AS age_band UNION ALL SELECT '20_24'
+    {_STUDENT_BANDS_SQL}
 ),
 non_student AS (
     SELECT department_code, region_code, commune_code, iris_code,
