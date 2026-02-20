@@ -180,12 +180,12 @@ export function monthlyDistribution(year, filters) {
   return `
     SELECT
       year,
-      month,
+      birth_month AS month,
       ROUND(SUM(population), 0) as total_population
     FROM dept
     WHERE year = ${year}${extra}
-    GROUP BY year, month
-    ORDER BY month
+    GROUP BY year, birth_month
+    ORDER BY birth_month
   `;
 }
 
@@ -194,12 +194,12 @@ export function monthlyDistributionAllYears(filters) {
   return `
     SELECT
       year,
-      month,
+      birth_month AS month,
       ROUND(SUM(population), 0) as total_population
     FROM dept
     WHERE ${where}
-    GROUP BY year, month
-    ORDER BY year, month
+    GROUP BY year, birth_month
+    ORDER BY year, birth_month
   `;
 }
 
@@ -207,13 +207,13 @@ export function domTomSeasonality(year, filters) {
   const extra = filters ? ` AND ${filterWhere(filters)}` : "";
   return `
     SELECT
-      month,
+      birth_month AS month,
       department_code,
       ROUND(SUM(population), 0) as population
     FROM dept
     WHERE year = ${year}${extra}
-    GROUP BY month, department_code
-    ORDER BY department_code, month
+    GROUP BY birth_month, department_code
+    ORDER BY department_code, birth_month
   `;
 }
 
@@ -407,9 +407,9 @@ export function availableDepartments() {
 
 export function hasMonthlyData() {
   return `
-    SELECT COUNT(DISTINCT month) as month_count
+    SELECT COUNT(DISTINCT birth_month) as month_count
     FROM dept
-    WHERE month IS NOT NULL
+    WHERE birth_month IS NOT NULL
   `;
 }
 
