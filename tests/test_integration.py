@@ -326,7 +326,11 @@ def test_age_ratios_sum_to_one(integration_processor):
 
 
 def test_all_months_present(integration_processor):
-    """Every year/department/age/sex should have exactly 12 months."""
+    """In default yearly mode, compact table has month=1; birth_month expansion is lazy.
+
+    The 12 birth-month sub-rows are applied on-the-fly at read/export time via
+    SELECT_WITH_BIRTH_MONTH, so the in-memory table stores only month=1.
+    """
     month_counts = integration_processor.conn.execute("""
         SELECT
             year,
@@ -336,11 +340,12 @@ def test_all_months_present(integration_processor):
             COUNT(DISTINCT month) AS n_months
         FROM population_department
         GROUP BY year, department_code, age, sex
-        HAVING COUNT(DISTINCT month) != 12
+        HAVING COUNT(DISTINCT month) != 1
     """).df()
 
     assert len(month_counts) == 0, (
-        f"{len(month_counts)} groups don't have 12 months:\n{month_counts.head(10)}"
+        f"{len(month_counts)} groups don't have exactly 1 month "
+        f"(yearly mode):\n{month_counts.head(10)}"
     )
 
 
@@ -391,7 +396,11 @@ def test_positive_populations(integration_processor):
 
 
 def test_projected_department_population_bounds(integration_processor):
-    """Individual population cells should stay within plausible bounds."""
+    """Individual population cells should stay within plausible bounds.
+
+    Compact tables store full annual population per cohort (birth-month
+    expansion is lazy), so values are ~12x larger than per-month rows.
+    """
     stats = integration_processor.conn.execute("""
         SELECT
             MIN(population) AS min_pop,
@@ -402,9 +411,9 @@ def test_projected_department_population_bounds(integration_processor):
 
     min_pop, max_pop, avg_pop = stats
     assert min_pop > 0, f"min population should be > 0, got {min_pop}"
-    assert max_pop < 5000, f"max population should be < 5000, got {max_pop}"
-    assert 50 <= avg_pop <= 1000, (
-        f"avg population should be in [50, 1000], got {avg_pop:.1f}"
+    assert max_pop < 60000, f"max population should be < 60000, got {max_pop}"
+    assert 600 <= avg_pop <= 12000, (
+        f"avg population should be in [600, 12000], got {avg_pop:.1f}"
     )
 
 
@@ -537,9 +546,9 @@ def test_precision_degrades_at_finer_levels(census_processor):
     avg_iris = coverage["iris_ratio"].mean()
 
     assert avg_epci >= 0.95, f"EPCI national avg coverage {avg_epci:.3f} < 0.95"
-    assert 0.40 <= avg_iris <= 0.80, (
-        f"IRIS national avg coverage {avg_iris:.3f} outside [0.40, 0.80]"
-    )
+    # Age-band-level geo ratios fill coverage gaps that existed with per-age
+    # ratios, bringing IRIS coverage from ~60% to ~99%.
+    assert avg_iris >= 0.95, f"IRIS national avg coverage {avg_iris:.3f} < 0.95"
 
     # IRIS coverage should generally not exceed EPCI coverage.
     # A few departments may have slightly higher IRIS than EPCI coverage because
@@ -558,8 +567,8 @@ def test_precision_degrades_at_finer_levels(census_processor):
 # ---------------------------------------------------------------------------
 
 
-def test_iris_coverage_urban_vs_rural(census_processor):
-    """Urban departments have higher IRIS coverage than rural ones."""
+def test_iris_coverage_all_departments(census_processor):
+    """All departments should have high IRIS coverage with age-band geo ratios."""
     coverage = census_processor.conn.execute("""
         WITH dept_totals AS (
             SELECT department_code, SUM(population) AS dept_pop
@@ -580,16 +589,15 @@ def test_iris_coverage_urban_vs_rural(census_processor):
 
     coverage = coverage.set_index("department_code")
 
-    urban_depts = ["75", "69", "13"]
-    rural_depts = ["23", "15", "46"]
-
-    for dept in urban_depts:
-        ratio = coverage.loc[dept, "iris_ratio"]
-        assert ratio > 0.70, f"Urban dept {dept} IRIS coverage {ratio:.3f} <= 0.70"
-
-    for dept in rural_depts:
-        ratio = coverage.loc[dept, "iris_ratio"]
-        assert ratio < 0.50, f"Rural dept {dept} IRIS coverage {ratio:.3f} >= 0.50"
+    # Age-band-level geo ratios provide near-complete coverage for all
+    # departments (urban and rural alike), typically > 95%.
+    # Exclude Mayotte (976) which is synthesized from estimates and has no IRIS data.
+    coverage_excl = coverage[~coverage.index.isin(DEPARTMENTS_MAYOTTE)]
+    low_coverage = coverage_excl[coverage_excl["iris_ratio"] < 0.90]
+    assert len(low_coverage) == 0, (
+        f"{len(low_coverage)} departments with IRIS coverage < 90%:\n"
+        f"{low_coverage.head(10)}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -843,4 +851,135 @@ def test_student_mobility_increases_20_24_concentration(
     assert corrected_stddev > uncorrected_stddev, (
         f"Corrected 20_24 geo_ratio stddev ({corrected_stddev:.6f}) should be "
         f"> uncorrected ({uncorrected_stddev:.6f})"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Monthly mode fixtures and tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def monthly_processor():
+    """Run the pipeline in monthly mode and return the processor."""
+    for fname in REQUIRED_CACHE_FILES:
+        if not (CACHE_DIR / fname).exists():
+            pytest.skip(f"Missing cache file: {fname}")
+
+    proc = PopulationProcessor(
+        year=2022,
+        min_age=0,
+        max_age=25,
+        start_year=2022,
+        end_year=2024,
+        correct_student_mobility=False,
+        monthly=True,
+        cache_dir=CACHE_DIR,
+    )
+    proc.download_and_process()
+    proc.create_multi_level_tables()
+    return proc
+
+
+def test_monthly_snapshot_is_full_stock(monthly_processor, quinquennal_df):
+    """Each snapshot month's population must equal the annual quinquennal stock.
+
+    Population is a stock: 862K 18-year-olds exist in January AND July.
+    month_ratio only splits birth-month sub-cohorts within each snapshot.
+
+    Regression: month_ratio was applied twice (projection + export), giving 1/12.
+    """
+    exported = monthly_processor.to_pandas("department")
+
+    # Compare each snapshot month's total against quinquennal for census year
+    quint_2022 = quinquennal_df[quinquennal_df["year"] == 2022]
+    quint_total = quint_2022[quint_2022["age_band"].isin(_COVERED_BANDS)][
+        "population"
+    ].sum()
+
+    for month in [1, 6, 12]:
+        month_pop = exported[(exported["year"] == 2022) & (exported["month"] == month)][
+            "population"
+        ].sum()
+
+        ratio = month_pop / quint_total if quint_total else 0
+        assert 0.95 <= ratio <= 1.05, (
+            f"Month {month} pop ({month_pop:,.0f}) should equal "
+            f"quinquennal stock ({quint_total:,.0f}), ratio={ratio:.4f}"
+        )
+
+
+def test_monthly_yearly_same_stock(integration_processor, monthly_processor):
+    """Monthly and yearly modes must produce the same per-snapshot total.
+
+    Yearly has 1 snapshot (Jan), monthly has 12. January totals must match.
+    """
+    yearly_df = integration_processor.to_pandas("department")
+    monthly_df = monthly_processor.to_pandas("department")
+
+    yearly_jan = yearly_df[(yearly_df["year"] == 2022) & (yearly_df["month"] == 1)][
+        "population"
+    ].sum()
+
+    monthly_jan = monthly_df[(monthly_df["year"] == 2022) & (monthly_df["month"] == 1)][
+        "population"
+    ].sum()
+
+    ratio = monthly_jan / yearly_jan if yearly_jan else 0
+    assert 0.99 <= ratio <= 1.01, (
+        f"Monthly Jan ({monthly_jan:,.0f}) != Yearly Jan ({yearly_jan:,.0f}), "
+        f"ratio={ratio:.4f}"
+    )
+
+
+def test_exported_population_matches_quinquennal(integration_processor, quinquennal_df):
+    """Exported department data summed by band must equal quinquennal input.
+
+    End-to-end check: quinquennal -> projection -> birth_month expansion
+    -> exported DataFrame. For the census year (2022), age ratios sum to 1
+    and month ratios sum to 1, so the match must be exact (<0.1%).
+    CAGR-extended years (2023-2024) may diverge slightly.
+    """
+    exported = integration_processor.to_pandas("department")
+    exported["age_band"] = exported["age"].map(_BAND_FOR_AGE)
+
+    # Aggregate exported data by year/dept/sex/band
+    exported_agg = (
+        exported[exported["age_band"].isin(_COVERED_BANDS)]
+        .groupby(["year", "department_code", "sex", "age_band"])["population"]
+        .sum()
+        .reset_index()
+    )
+
+    # Merge with quinquennal
+    quint_covered = quinquennal_df[quinquennal_df["age_band"].isin(_COVERED_BANDS)]
+    merged = exported_agg.merge(
+        quint_covered,
+        on=["year", "department_code", "sex", "age_band"],
+        how="inner",
+        suffixes=("_exported", "_quinq"),
+    )
+
+    assert len(merged) > 0, "No matching rows between exported and quinquennal"
+
+    merged["rel_diff"] = (
+        abs(merged["population_exported"] - merged["population_quinq"])
+        / merged["population_quinq"]
+    )
+
+    # Census year must match exactly (ratios sum to 1)
+    census_rows = merged[merged["year"] == 2022]
+    census_failures = census_rows[census_rows["rel_diff"] > 0.001]
+    assert len(census_failures) == 0, (
+        f"{len(census_failures)} census-year band totals differ by >0.1%:\n"
+        f"{census_failures[['department_code', 'sex', 'rel_diff']].head(10)}"
+    )
+
+    # CAGR-extended years: allow 15% tolerance (growth rate approximation,
+    # outlier departments like Paris with volatile student population)
+    extended_rows = merged[merged["year"] > 2022]
+    extended_failures = extended_rows[extended_rows["rel_diff"] > 0.15]
+    assert len(extended_failures) == 0, (
+        f"{len(extended_failures)} extended-year totals differ by >15%:\n"
+        f"{extended_failures[['year', 'department_code', 'rel_diff']].head(10)}"
     )

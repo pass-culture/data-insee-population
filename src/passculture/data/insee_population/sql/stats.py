@@ -1,10 +1,6 @@
 """Output queries, statistics, and validation templates."""
 
 __all__ = [
-    "COPY_CANTON_TO_PARQUET",
-    "COPY_DEPARTMENT_TO_PARQUET",
-    "COPY_EPCI_TO_PARQUET",
-    "COPY_IRIS_TO_PARQUET",
     "COUNT_INVALID_POPULATION",
     "GET_CANTON_SUMMARY",
     "GET_DEPARTMENT_SUMMARY",
@@ -13,21 +9,35 @@ __all__ = [
     "GET_IRIS_SUMMARY",
     "GET_ROW_COUNT",
     "GET_VALIDATION_STATS",
-    "SELECT_CANTON",
-    "SELECT_DEPARTMENT",
-    "SELECT_EPCI",
-    "SELECT_IRIS",
+    "SELECT_WITH_BIRTH_MONTH",
 ]
 
-SELECT_CANTON = "SELECT * FROM population_canton"
-SELECT_DEPARTMENT = "SELECT * FROM population_department"
-SELECT_IRIS = "SELECT * FROM population_iris"
-SELECT_EPCI = "SELECT * FROM population_epci"
-
-COPY_CANTON_TO_PARQUET = "COPY population_canton TO '{path}' (FORMAT PARQUET)"
-COPY_DEPARTMENT_TO_PARQUET = "COPY population_department TO '{path}' (FORMAT PARQUET)"
-COPY_IRIS_TO_PARQUET = "COPY population_iris TO '{path}' (FORMAT PARQUET)"
-COPY_EPCI_TO_PARQUET = "COPY population_epci TO '{path}' (FORMAT PARQUET)"
+# Streaming birth-month expansion: reads compact table and joins with
+# monthly_births on-the-fly.  Avoids materialising 12x rows in memory.
+# Placeholders: {level} = table suffix, {geo_columns} = level-specific cols.
+SELECT_WITH_BIRTH_MONTH = """
+SELECT
+    pd.year,
+    pd.month,
+    bb.month AS birth_month,
+    pd.snapshot_month,
+    MAKE_DATE(pd.year - pd.age, bb.month, 1) AS born_date,
+    DATEDIFF('month', MAKE_DATE(pd.year - pd.age, bb.month, 1),
+            pd.snapshot_month) / 12.0 AS decimal_age,
+    {geo_columns}
+    pd.age,
+    pd.sex,
+    pd.geo_precision,
+    pd.population * bb.month_ratio AS population,
+    pd.confidence_pct,
+    pd.population * bb.month_ratio * (1.0 - pd.confidence_pct)
+        AS population_low,
+    pd.population * bb.month_ratio * (1.0 + pd.confidence_pct)
+        AS population_high
+FROM population_{level} pd
+JOIN monthly_births bb ON pd.department_code = bb.department_code
+WHERE pd.population * bb.month_ratio > 0
+"""
 
 GET_ROW_COUNT = "SELECT COUNT(*) FROM population"
 

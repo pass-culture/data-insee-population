@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from google.cloud import bigquery
+from loguru import logger
 
 from passculture.data.insee_population.constants import POPULATION_SCHEMAS
 
@@ -57,7 +58,7 @@ def export_to_bigquery(
     job = client.load_table_from_dataframe(df, table_ref, job_config=job_config)
     job.result()
 
-    print(f"Loaded {job.output_rows} rows to {table_ref}")
+    logger.info("Loaded {} rows to {}", job.output_rows, table_ref)
 
 
 def export_all_to_bigquery(

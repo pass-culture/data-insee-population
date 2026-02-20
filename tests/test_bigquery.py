@@ -186,6 +186,7 @@ class TestSchemaStructure:
         common_names = {
             "year",
             "month",
+            "birth_month",
             "snapshot_month",
             "born_date",
             "decimal_age",

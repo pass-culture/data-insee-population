@@ -9,7 +9,8 @@
  * Zoom-based level transitions:
  *   zoom < 7.5  → Departments (fill-opacity 0.7)
  *   7.5 – 10    → EPCI (crossfade dept→EPCI)
- *   10+         → IRIS auto-loaded (crossfade EPCI→IRIS)
+ *   9 – 11      → Canton auto-loaded per department
+ *   11+         → IRIS auto-loaded (crossfade canton→IRIS)
  */
 import maplibregl from "maplibre-gl";
 import { scaleSequential } from "d3-scale";

@@ -17,11 +17,14 @@ from typing import TYPE_CHECKING
 
 import duckdb
 import pandas as pd
+from loguru import logger
 
 from passculture.data.insee_population import sql
 from passculture.data.insee_population.constants import (
     DEPARTMENTS_DOM,
     DEPARTMENTS_METRO,
+    IRIS_SENTINEL_NO_GEO,
+    MAX_AGE,
     MAX_CAGR_EXTENSION,
 )
 from passculture.data.insee_population.downloaders import (
@@ -39,6 +42,18 @@ from passculture.data.insee_population.projections import (
 
 if TYPE_CHECKING:
     from typing import Any
+
+# Geo columns per level — used by SELECT_WITH_BIRTH_MONTH to expand
+# compact tables with birth_month on-the-fly at read/export time.
+_GEO_COLUMNS = {
+    "department": "pd.department_code, pd.region_code,",
+    "epci": "pd.department_code, pd.region_code, pd.epci_code,",
+    "canton": "pd.department_code, pd.region_code, pd.canton_code,",
+    "iris": (
+        "pd.department_code, pd.region_code, pd.epci_code,"
+        " pd.commune_code, pd.iris_code,"
+    ),
+}
 
 
 class PopulationProcessor:
@@ -62,13 +77,14 @@ class PopulationProcessor:
         self,
         year: int = 2022,
         min_age: int = 0,
-        max_age: int = 120,
+        max_age: int = MAX_AGE,
         start_year: int = 2015,
         end_year: int = 2030,
         include_dom: bool = True,
         include_com: bool = True,
         include_mayotte: bool = True,
         correct_student_mobility: bool = True,
+        monthly: bool = False,
         cache_dir: str | Path | None = "data/cache",
     ) -> None:
         """Initialize processor with filtering options."""
@@ -81,6 +97,7 @@ class PopulationProcessor:
         self.include_com = include_com
         self.include_mayotte = include_mayotte
         self.correct_student_mobility = correct_student_mobility
+        self.monthly = monthly
         self.cache_dir = Path(cache_dir) if cache_dir else None
 
         # Validate forecast horizon
@@ -96,6 +113,7 @@ class PopulationProcessor:
             )
 
         self.conn = duckdb.connect()
+        self.conn.execute("SET preserve_insertion_order=false")
         # Allow DuckDB to spill to disk when in-memory tables exceed RAM
         if self.cache_dir:
             temp_dir = Path(self.cache_dir) / "duckdb_temp"
@@ -108,16 +126,22 @@ class PopulationProcessor:
         """Download INDCVI census data and create base population table."""
         parquet_path = download_indcvi(self.year, self.cache_dir)
 
-        print(f"Processing INDCVI {self.year} (ages {self.min_age}-{self.max_age})...")
+        logger.info(
+            "Processing INDCVI {} (ages {}-{})...",
+            self.year,
+            self.min_age,
+            self.max_age,
+        )
         self._execute(
             sql.CREATE_BASE_TABLE.format(
                 parquet_path=parquet_path,
                 where_clause=self._build_where_clause(skip_age_filter=True),
                 year=self.year,
+                iris_sentinel_no_geo=IRIS_SENTINEL_NO_GEO,
             )
         )
 
-        print(f"Base table: {self._row_count():,} rows")
+        logger.info("Base table: {:,} rows", self._row_count())
         self._base_table_created = True
 
         if self.include_mayotte:
@@ -147,12 +171,16 @@ class PopulationProcessor:
         # census_age = target_age + (census_year - year) >= 0
         # → year <= census_year + min_age
         max_pipeline_year = min(ey, self.year + self.min_age)
-        print(f"Creating multi-year projected tables ({sy}-{ey})...")
+        logger.info("Creating multi-year projected tables ({}-{})...", sy, ey)
         if max_pipeline_year < ey:
-            print(f"  Pipeline valid to {max_pipeline_year}, CAGR will extend to {ey}")
+            logger.info(
+                "  Pipeline valid to {}, CAGR will extend to {}",
+                max_pipeline_year,
+                ey,
+            )
 
         # 1. Download and register quinquennal estimates (needed by age ratios)
-        print("Step 1: Loading quinquennal estimates...")
+        logger.info("Step 1: Loading quinquennal estimates...")
         quinquennal_df = download_quinquennal_estimates(
             self.start_year, max_pipeline_year, self.cache_dir
         )
@@ -164,26 +192,28 @@ class PopulationProcessor:
                 "year"
             ]
             if mayotte_years.empty:
-                print(
-                    "  Warning: No quinquennal data for Mayotte (976)"
-                    " — population will be 0"
+                logger.warning(
+                    "  No quinquennal data for Mayotte (976) -- population will be 0"
                 )
             elif self.start_year < mayotte_years.min():
-                print(
-                    f"  Warning: Mayotte (976) quinquennal data starts at"
-                    f" {mayotte_years.min()}, population will be 0 for"
-                    f" {self.start_year}-{int(mayotte_years.min()) - 1}"
+                logger.warning(
+                    "  Mayotte (976) quinquennal data starts at"
+                    " {}, population will be 0 for"
+                    " {}-{}",
+                    mayotte_years.min(),
+                    self.start_year,
+                    int(mayotte_years.min()) - 1,
                 )
 
         # 2. Compute cohort-shifted age ratios from INDCVI base table
-        print("Step 2: Computing cohort-shifted age ratios from census...")
+        logger.info("Step 2: Computing cohort-shifted age ratios from census...")
         compute_age_ratios(self.conn, census_year=self.year)
 
         # 3. Download and register monthly birth distribution
-        print("Step 3: Loading monthly birth distribution...")
+        logger.info("Step 3: Loading monthly birth distribution...")
         monthly_births_df = download_monthly_birth_distribution(self.cache_dir)
         if monthly_births_df.empty:
-            print("  Warning: Birth data unavailable, using uniform 1/12 distribution")
+            logger.warning("  Birth data unavailable, using uniform 1/12 distribution")
             monthly_births_df = self._build_uniform_monthly_distribution()
 
         # Pad departments present in population but missing from birth data
@@ -195,9 +225,10 @@ class PopulationProcessor:
         depts_in_births = set(monthly_births_df["department_code"])
         missing = depts_in_pop - depts_in_births
         if missing:
-            print(
-                f"  Padding {len(missing)} depts missing from birth data:"
-                f" {sorted(missing)}"
+            logger.debug(
+                "  Padding {} depts missing from birth data: {}",
+                len(missing),
+                sorted(missing),
             )
             pad_rows = [
                 {"department_code": d, "month": m, "month_ratio": 1.0 / 12}
@@ -212,7 +243,7 @@ class PopulationProcessor:
         self._execute(sql.REGISTER_MONTHLY_BIRTHS)
 
         # 4. Compute geographic ratios
-        print("Step 4: Computing geographic ratios...")
+        logger.info("Step 4: Computing geographic ratios...")
         compute_geo_ratios(self.conn, "epci")
         compute_geo_ratios(self.conn, "canton")
         compute_geo_ratios(self.conn, "iris")
@@ -226,30 +257,35 @@ class PopulationProcessor:
                 compute_department_mobility_rates,
             )
 
-            print("Step 4b: Computing department mobility rates...")
+            logger.info("Step 4b: Computing department mobility rates...")
             mobsco_path = download_mobsco(self.cache_dir)
             compute_department_mobility_rates(self.conn, mobsco_path)
 
-            print("Step 4c: Correcting EPCI geo ratios for student mobility...")
+            logger.info("Step 4c: Correcting EPCI geo ratios for student mobility...")
             apply_student_mobility_correction(self.conn, mobsco_path)
 
-            print("Step 4d: Correcting IRIS geo ratios for student mobility...")
+            logger.info("Step 4d: Correcting IRIS geo ratios for student mobility...")
             apply_student_mobility_correction_iris(self.conn, mobsco_path)
 
         # 5. Project multi-year at all levels
-        print("Step 5: Projecting population...")
+        logger.info("Step 5: Projecting population...")
         project_multi_year(
             self.conn,
             self.min_age,
             self.max_age,
             end_year=self.end_year,
             census_year=self.year,
+            monthly=self.monthly,
         )
 
         return self
 
     def save_multi_level(self, output_dir: str | Path) -> dict[str, Path]:
         """Save all multi-level tables to parquet files.
+
+        Birth-month expansion (12 sub-rows per cohort) is applied on-the-fly
+        via streaming COPY — the full expanded result is never materialised
+        in memory.
 
         Args:
             output_dir: Directory to save the files
@@ -263,8 +299,11 @@ class PopulationProcessor:
         paths = {}
         for level in ["department", "epci", "canton", "iris"]:
             path = output_dir / f"population_{level}.parquet"
-            query = getattr(sql, f"COPY_{level.upper()}_TO_PARQUET")
-            self._execute(query.format(path=path))
+            select = sql.SELECT_WITH_BIRTH_MONTH.format(
+                level=level,
+                geo_columns=_GEO_COLUMNS[level],
+            )
+            self._execute(f"COPY ({select}) TO '{path}' (FORMAT PARQUET)")
             paths[level] = path
 
         return paths
@@ -291,11 +330,17 @@ class PopulationProcessor:
     def to_pandas(self, level: str = "department") -> pd.DataFrame:
         """Export a specific level to pandas DataFrame.
 
+        Birth-month expansion is applied on-the-fly so in-memory tables
+        stay compact.
+
         Args:
             level: One of 'department', 'epci', 'canton', 'iris'
         """
-        table = f"population_{level}"
-        return self._execute(f"SELECT * FROM {table}").df()
+        select = sql.SELECT_WITH_BIRTH_MONTH.format(
+            level=level,
+            geo_columns=_GEO_COLUMNS[level],
+        )
+        return self._execute(select).df()
 
     def validate(self) -> dict[str, Any]:
         """Validate population data against expected structure."""
@@ -370,13 +415,13 @@ class PopulationProcessor:
         try:
             # Use all ages — age filtering happens in projection SQL
             mayotte_df = synthesize_mayotte_population(
-                self.year, 0, 120, cache_dir=self.cache_dir
+                self.year, 0, MAX_AGE, cache_dir=self.cache_dir
             )
             if not mayotte_df.empty:
                 self._register_dataframe("mayotte_df", mayotte_df)
                 self._execute(sql.INSERT_MAYOTTE)
         except Exception as e:
-            print(f"  Warning: Could not add Mayotte: {e}")
+            logger.warning("  Could not add Mayotte: {}", e)
 
     def _build_uniform_monthly_distribution(self) -> pd.DataFrame:
         """Build uniform 1/12 monthly distribution from departments in base table."""

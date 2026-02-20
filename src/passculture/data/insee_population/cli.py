@@ -61,10 +61,47 @@ def population(
         "data/cache",
         help="Cache directory for downloads",
     ),
+    monthly: bool = typer.Option(
+        False,
+        "--monthly/--no-monthly",
+        help="Monthly snapshots (12x more rows). Default: yearly at Jan 1st.",
+    ),
+    to_bigquery: bool = typer.Option(
+        False,
+        "--to-bigquery",
+        help="Export to BigQuery instead of local parquet files",
+    ),
+    project_id: str = typer.Option(
+        "",
+        "--project-id",
+        help="GCP project ID (required with --to-bigquery)",
+    ),
+    dataset: str = typer.Option(
+        "",
+        "--dataset",
+        help="BigQuery dataset name (required with --to-bigquery)",
+    ),
+    table_prefix: str = typer.Option(
+        "population",
+        "--table-prefix",
+        help="BigQuery table name prefix (default: population)",
+    ),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
         help="Preview only, no file output",
+    ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "-v",
+        help="Show debug-level details (download progress, ratios, timings)",
+    ),
+    quiet: bool = typer.Option(
+        False,
+        "--quiet",
+        "-q",
+        help="Suppress info messages, show only warnings and errors",
     ),
 ) -> None:
     """Import INSEE population data at multiple geographic levels.
@@ -84,48 +121,49 @@ def population(
         uv run insee-population population --min-age 15 --max-age 24 \\
             --start-year 2015 --end-year 2030
     """
-    from passculture.data.insee_population.constants import MAX_CAGR_EXTENSION
     from passculture.data.insee_population.duckdb_processor import (
         PopulationProcessor,
     )
+    from passculture.data.insee_population.logging import configure_logging
 
-    # Validate forecast horizon before starting any work
-    max_pipeline_year = year + min_age
-    max_allowed = max_pipeline_year + MAX_CAGR_EXTENSION
-    if end_year > max_allowed:
+    verbosity = 1 if verbose else (-1 if quiet else 0)
+    configure_logging(verbosity)
+
+    # Validate BigQuery options
+    if to_bigquery and (not project_id or not dataset):
         console.print(
-            f"[red bold]Error: end_year {end_year} exceeds maximum "
-            f"reliable forecast year ({max_allowed}).[/red bold]"
+            "[red bold]Error: --project-id and --dataset are required "
+            "with --to-bigquery.[/red bold]"
         )
-        console.print(
-            f"  With census year {year} and min_age {min_age}, "
-            f"ratio-based projection is valid to {max_pipeline_year}."
-        )
-        console.print(f"  CAGR can extend up to {MAX_CAGR_EXTENSION} more years.")
-        console.print("  Reduce --end-year or increase --min-age to extend the range.")
         raise typer.Exit(code=1)
 
+    mode_label = "monthly" if monthly else "yearly"
     console.print("[bold blue]INSEE Population Import[/bold blue]")
     console.print(
         f"Census year: {year} | Ages: {min_age}-{max_age} | "
-        f"Projection: {start_year}-{end_year} (monthly)"
+        f"Projection: {start_year}-{end_year} ({mode_label})"
     )
 
     if include_mayotte:
         console.print("[dim]+ Including Mayotte (976)[/dim]")
 
-    processor = PopulationProcessor(
-        year=year,
-        min_age=min_age,
-        max_age=max_age,
-        start_year=start_year,
-        end_year=end_year,
-        include_dom=include_dom,
-        include_com=include_com,
-        include_mayotte=include_mayotte,
-        correct_student_mobility=correct_student_mobility,
-        cache_dir=cache_dir,
-    )
+    try:
+        processor = PopulationProcessor(
+            year=year,
+            min_age=min_age,
+            max_age=max_age,
+            start_year=start_year,
+            end_year=end_year,
+            include_dom=include_dom,
+            include_com=include_com,
+            include_mayotte=include_mayotte,
+            correct_student_mobility=correct_student_mobility,
+            monthly=monthly,
+            cache_dir=cache_dir,
+        )
+    except ValueError as e:
+        console.print(f"[red bold]Error: {e}[/red bold]")
+        raise typer.Exit(code=1) from None
 
     processor.download_and_process()
     processor.create_multi_level_tables()
@@ -134,6 +172,12 @@ def population(
 
     if dry_run:
         _print_preview(processor)
+    elif to_bigquery:
+        from passculture.data.insee_population.bigquery import export_all_to_bigquery
+
+        console.print(f"\n[bold]Exporting to BigQuery: {project_id}.{dataset}[/bold]")
+        export_all_to_bigquery(processor, project_id, dataset, table_prefix)
+        console.print("[green]BigQuery export complete.[/green]")
     else:
         output_path = Path(output_dir)
         paths = processor.save_multi_level(output_path)
@@ -165,7 +209,7 @@ def _print_summary(processor) -> None:
     """Print summary statistics for the processed data."""
     console.print("\n[bold]Summary by geographic level:[/bold]")
 
-    for level in ["department", "epci", "iris"]:
+    for level in ["department", "epci", "canton", "iris"]:
         table = f"population_{level}"
         try:
             _print_level_summary(processor, level, table)
@@ -180,6 +224,9 @@ def _print_level_summary(processor, level: str, table: str) -> None:
     if level == "epci":
         geo_col = "epci_code"
         geo_label = "EPCIs"
+    elif level == "canton":
+        geo_col = "canton_code"
+        geo_label = "cantons"
     elif level == "iris":
         geo_col = "iris_code"
         geo_label = "IRIS"
@@ -221,15 +268,22 @@ def info() -> None:
     console.print("\n  [bold]population_epci.parquet[/bold] (100% coverage)")
     console.print("    Aggregated by EPCI")
 
+    console.print("\n  [bold]population_canton.parquet[/bold] (~100% coverage)")
+    console.print("    Aggregated by canton")
+
     console.print("\n  [bold]population_iris.parquet[/bold] (~60% coverage)")
     console.print("    Fine-grained IRIS level - only precise data")
 
     console.print("\n[bold blue]Columns[/bold blue]")
-    console.print("  All levels: year, month, snapshot_month, born_date, decimal_age,")
+    console.print(
+        "  All levels: year, month, birth_month, snapshot_month,"
+        " born_date, decimal_age,"
+    )
     console.print(
         "    department_code, region_code, age, sex, geo_precision, population"
     )
     console.print("  epci: + epci_code")
+    console.print("  canton: + canton_code")
     console.print("  iris: + epci_code, commune_code, iris_code")
 
 
