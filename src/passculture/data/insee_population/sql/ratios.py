@@ -121,6 +121,27 @@ dept_totals AS (
         SUM(epci_population) AS dept_population
     FROM epci_pop
     GROUP BY department_code, age_band, sex
+),
+-- Departments with no commune-level data (e.g. Mayotte) get a passthrough
+-- EPCI entry using the department code, with geo_ratio=1.0.
+fallback_depts AS (
+    SELECT DISTINCT department_code
+    FROM population
+    WHERE department_code NOT IN (SELECT DISTINCT department_code FROM epci_pop)
+      AND iris_code = '{iris_sentinel_no_geo}'
+),
+synthetic_epci AS (
+    SELECT
+        p.department_code,
+        p.department_code AS epci_code,
+        abm.age_band,
+        p.sex,
+        1.0 AS geo_ratio
+    FROM population p
+    JOIN age_band_map abm ON p.age = abm.age
+    JOIN fallback_depts fd ON p.department_code = fd.department_code
+    WHERE abm.age_band IS NOT NULL
+    GROUP BY p.department_code, abm.age_band, p.sex
 )
 SELECT
     ep.department_code,
@@ -136,6 +157,8 @@ JOIN dept_totals dt
     ON ep.department_code = dt.department_code
     AND ep.age_band = dt.age_band
     AND ep.sex = dt.sex
+UNION ALL
+SELECT * FROM synthetic_epci
 """
 
 # Compute IRIS share within each dept/age_band/sex from INDCVI population
@@ -177,6 +200,31 @@ dept_totals AS (
         SUM(iris_population) AS dept_population
     FROM iris_pop
     GROUP BY department_code, age_band, sex
+),
+-- Departments with no IRIS data get a passthrough entry using the sentinel
+-- iris_code already assigned to them, with geo_ratio=1.0.
+fallback_depts AS (
+    SELECT DISTINCT department_code
+    FROM population
+    WHERE department_code NOT IN (SELECT DISTINCT department_code FROM iris_pop)
+      AND iris_code = '{iris_sentinel_no_geo}'
+),
+synthetic_iris AS (
+    SELECT
+        p.department_code,
+        p.region_code,
+        p.commune_code,
+        p.iris_code,
+        NULL AS epci_code,
+        abm.age_band,
+        p.sex,
+        1.0 AS geo_ratio
+    FROM population p
+    JOIN age_band_map abm ON p.age = abm.age
+    JOIN fallback_depts fd ON p.department_code = fd.department_code
+    WHERE abm.age_band IS NOT NULL
+    GROUP BY p.department_code, p.region_code, p.commune_code, p.iris_code,
+             abm.age_band, p.sex
 )
 SELECT
     ip.department_code,
@@ -195,6 +243,8 @@ JOIN dept_totals dt
     ON ip.department_code = dt.department_code
     AND ip.age_band = dt.age_band
     AND ip.sex = dt.sex
+UNION ALL
+SELECT * FROM synthetic_iris
 """
 
 # Compute canton share within each dept/age_band/sex from INDCVI population

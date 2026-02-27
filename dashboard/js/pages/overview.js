@@ -45,13 +45,17 @@ export async function renderOverview(container) {
   const epciYears = epciByYear.map((d) => String(d.year));
   const epciPops = epciByYear.map((d) => d.total_population);
 
-  // Difference data
-  const diffYears = [];
-  const diffValues = [];
-  for (const d of deptByYear) {
-    const e = epciByYear.find((e) => e.year === d.year);
-    diffYears.push(String(d.year));
-    diffValues.push(d.total_population - (e ? e.total_population : 0));
+  // Year-over-year growth rate (%)
+  const growthYears = [];
+  const growthValues = [];
+  for (let i = 1; i < deptByYear.length; i++) {
+    const prev = deptByYear[i - 1];
+    const curr = deptByYear[i];
+    growthYears.push(String(curr.year));
+    const rate = prev.total_population > 0
+      ? ((curr.total_population - prev.total_population) / prev.total_population * 100)
+      : 0;
+    growthValues.push(Math.round(rate * 100) / 100);
   }
 
   container.innerHTML = `
@@ -111,13 +115,13 @@ export async function renderOverview(container) {
         </div>
       </div>
       <div class="card card-full">
-        <h3>Écart dép. vs EPCI par année</h3>
+        <h3>Évolution annuelle de la population (%)</h3>
         <div class="chart-container">
           <bar-chart
-            x='${JSON.stringify([diffYears])}'
-            y='${JSON.stringify([diffValues])}'
-            name='["Écart"]'
-            unit-tooltip="habitants">
+            x='${JSON.stringify([growthYears])}'
+            y='${JSON.stringify([growthValues])}'
+            name='["Croissance (%)"]'
+            unit-tooltip="%">
           </bar-chart>
         </div>
       </div>

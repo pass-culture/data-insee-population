@@ -37,7 +37,9 @@ BIRTH_DATA_URLS = {
     # Births by department and year (for cohort tracking)
     "by_dept_year": "https://www.insee.fr/fr/statistiques/fichier/2381380/T_nais_dep.xlsx",
     # Births by department and month (for monthly distribution)
-    "by_dept_month": "https://www.insee.fr/fr/statistiques/fichier/2381380/T_nais_dep_mois.xlsx",
+    # N4D: naissances vivantes par mois et département (page 8582142)
+    # Columns: REGDEP_DOMI_MERE (region+dept), MNAIS (01-12/AN), NBNAIS
+    "by_dept_month": "https://www.insee.fr/fr/statistiques/fichier/8582142/N4D.csv",
     # Monthly births by department of residence (2 years per file)
     # Source: https://www.insee.fr/fr/statistiques/6041515?sommaire=5348638
     "by_month_dept": "https://www.insee.fr/fr/statistiques/fichier/6041515/naissances_dep_decembre_2021.xlsx",

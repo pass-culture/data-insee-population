@@ -1073,6 +1073,56 @@ class TestDownloaderHelpers:
         assert _MONTH_NAMES["décembre"] == 12
         assert len(_MONTH_NAMES) == 12
 
+    def test_parse_n4d_birth_csv(self):
+        """Test N4D CSV parser extracts department codes and monthly ratios."""
+        from passculture.data.insee_population.downloaders import _parse_n4d_birth_csv
+
+        # REGDEP_DOMI_MERE formats:
+        # "1175" = region 11 + dept 75 (Paris) → strip prefix → "75"
+        # "2418" = region 24 + dept 18 (Cher) → strip prefix → "18"
+        # "971"  = bare DOM dept code (Guadeloupe) → kept as-is → "971"
+        # "11XX" = regional aggregate → excluded (contains X)
+        # "97XX" = DOM regional aggregate → excluded
+        # "AN"   = annual total → excluded
+        csv = "\n".join(
+            [
+                "REGDEP_DOMI_MERE;MNAIS;NBNAIS",
+                "1175;01;1200",
+                "1175;02;900",
+                "1175;AN;2100",  # annual total — excluded
+                "2418;01;100",
+                "2418;02;200",
+                "2418;AN;300",
+                "971;01;50",  # DOM: bare 3-digit code, kept as-is
+                "971;02;50",
+                "971;AN;100",
+                "11XX;01;9999",  # regional aggregate — excluded
+                "97XX;01;9999",  # DOM regional aggregate — excluded
+            ]
+        )
+        result = _parse_n4d_birth_csv(csv)
+
+        depts = set(result["department_code"])
+        assert "75" in depts
+        assert "18" in depts
+        assert "971" in depts
+        assert "11XX"[2:] not in depts  # aggregates excluded
+
+        # Ratios must sum to 1.0 per department
+        for dept, grp in result.groupby("department_code"):
+            assert abs(grp["month_ratio"].sum() - 1.0) < 1e-9, (
+                f"{dept} ratios don't sum to 1"
+            )
+
+        # Paris: jan=1200, feb=900, total=2100 → ratios 4/7 and 3/7
+        paris = result[result["department_code"] == "75"].set_index("month")
+        assert abs(paris.loc[1, "month_ratio"] - 1200 / 2100) < 1e-9
+        assert abs(paris.loc[2, "month_ratio"] - 900 / 2100) < 1e-9
+
+        # Guadeloupe: bare DOM code — both months equal
+        guad = result[result["department_code"] == "971"].set_index("month")
+        assert abs(guad.loc[1, "month_ratio"] - 0.5) < 1e-9
+
 
 # -----------------------------------------------------------------------------
 # Test: Quinquennal Cache Re-extrapolation

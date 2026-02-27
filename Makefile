@@ -24,8 +24,8 @@ lint:  ## Run linter
 format:  ## Format code
 	$(UV) run ruff format .
 
-run:  ## Run full pipeline (ages 15-24, 2015-2030)
-	$(UV) run insee-population population --year 2022 --min-age 15 --max-age 24 --start-year 2015 --end-year 2030 -o data/output
+run:  ## Run full pipeline (ages 15-24, 2019-2026)
+	$(UV) run insee-population population --min-age 15 --max-age 24 --start-year 2019 --end-year 2026 -o data/output
 
 info:  ## Show available years and schema
 	$(UV) run insee-population info

@@ -254,7 +254,9 @@ def download_monthly_birth_distribution(
     Returns:
         DataFrame with columns: department_code, month (1-12), month_ratio
     """
-    cache_path = cache_dir / "monthly_birth_distribution.parquet" if cache_dir else None
+    cache_path = (
+        cache_dir / "monthly_birth_distribution_n4d.parquet" if cache_dir else None
+    )
     if cache_path and cache_path.exists():
         logger.debug("Using cached monthly birth distribution: {}", cache_path)
         return pd.read_parquet(cache_path)
@@ -269,8 +271,11 @@ def download_monthly_birth_distribution(
         response = requests.get(url, timeout=ESTIMATES_TIMEOUT)
         response.raise_for_status()
 
-        xls = pd.ExcelFile(io.BytesIO(response.content))
-        df = _parse_monthly_birth_excel(xls)
+        if url.endswith(".csv"):
+            df = _parse_n4d_birth_csv(response.text)
+        else:
+            xls = pd.ExcelFile(io.BytesIO(response.content))
+            df = _parse_monthly_birth_excel(xls)
 
         if df.empty:
             return df
@@ -492,6 +497,47 @@ _MONTH_NAMES = {
     "novembre": 11,
     "décembre": 12,
 }
+
+
+def _parse_n4d_birth_csv(content: str) -> pd.DataFrame:
+    """Parse INSEE N4D CSV (births by department and month) into monthly ratios.
+
+    Format: semicolon-separated with columns:
+    - REGDEP_DOMI_MERE: geographic code — two formats:
+        * 4-char "RRDD": region(2) + metro dept(2), e.g. "1175" → dept "75"
+        * 3-char "DDD": bare DOM dept code, e.g. "971", "972", "976"
+      Aggregate codes containing "X" ("11XX", "97XX", "FR", "FM"…) are skipped.
+    - MNAIS: "01"-"12" for months, "AN" for annual total (skipped)
+    - NBNAIS: number of births
+    """
+    df = pd.read_csv(io.StringIO(content), sep=";", dtype=str)
+
+    # Drop annual totals and aggregate codes (contain "X" or are national codes)
+    df = df[df["MNAIS"] != "AN"].copy()
+    df = df[~df["REGDEP_DOMI_MERE"].str.contains("X", na=True)]
+    df = df[~df["REGDEP_DOMI_MERE"].isin(["FR", "FM", "FR_ENR", "FM_ENR"])]
+
+    # Extract department code:
+    # - 3-char codes are bare DOM dept codes (971, 972, 973, 974, 976)
+    # - 4-char codes are region(2) + metro dept(2), strip the region prefix
+    def _extract_dept(regdep: str) -> str:
+        return regdep if len(regdep) == 3 else regdep[2:]
+
+    df["department_code"] = df["REGDEP_DOMI_MERE"].apply(_extract_dept)
+    df["month"] = pd.to_numeric(df["MNAIS"], errors="coerce")
+    df["births"] = pd.to_numeric(df["NBNAIS"], errors="coerce").fillna(0)
+    df = df[df["month"].notna() & (df["births"] > 0)]
+
+    result = df.groupby(["department_code", "month"])["births"].sum().reset_index()
+
+    totals = result.groupby("department_code")["births"].sum().reset_index()
+    totals.columns = ["department_code", "annual_births"]
+    result = result.merge(totals, on="department_code")
+    result["month_ratio"] = result["births"] / result["annual_births"]
+
+    n_depts = result["department_code"].nunique()
+    logger.debug("  Computed monthly ratios for {} departments (N4D CSV)", n_depts)
+    return result[["department_code", "month", "month_ratio"]].copy()
 
 
 def _parse_monthly_birth_excel(xls: pd.ExcelFile) -> pd.DataFrame:
