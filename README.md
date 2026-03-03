@@ -59,127 +59,44 @@ Geographic ratios use the **structure-repeats hypothesis**: the sub-department d
 
 The census records people at their *residence* commune, but students aged 15-24 often live in a different city from where they study. This causes the EPCI geo_ratios for the `15_19` and `20_24` bands to undercount university cities and overcount family-home departments.
 
-When `correct_student_mobility=True` (the default), the pipeline blends census-based geo_ratios with study-destination ratios from the MOBSCO commuting file, using **per-department blend weights** derived from actual inter-departmental student mobility rates:
+When `correct_student_mobility=True` (the default), the pipeline blends census-based geo_ratios with study-destination ratios from the MOBSCO commuting file:
 
 ```
-corrected = (1 - w_dept) * census_ratio + w_dept * study_ratio
+corrected = (1 - w) * census_ratio + w * study_ratio
 ```
 
-Where `w_dept = min(mobility_rate, 0.6)` and `mobility_rate` is the fraction of students in that department who study in a different department. Departments not in MOBSCO use a default weight of 0.3. This gives higher correction weights to Ile-de-France suburbs (50-62% inter-dept mobility) and lower weights to university cities (5-7%).
+Blend weights are **per-department and per-age-band**, derived from actual inter-departmental mobility rates using MOBSCO AGEREV10 groups:
 
-Then renormalizes so ratios still sum to 1 per (dept, band, sex). Other age bands are unchanged.
+| Band | MOBSCO group used | Typical `w` range | Cap |
+|------|------------------|--------------------|-----|
+| `15_19` | `AGEREV10='15'` (lycée, ~15–17) | 0–15% | 0.25 |
+| `20_24` | `AGEREV10='18'` (higher-ed, ~18–24) | 5–60% | 0.60 |
 
-## Known biases and accuracy
+Departments absent from MOBSCO use per-band defaults (0.10 for `15_19`, 0.30 for `20_24`). After blending, ratios are renormalized to sum to 1. Other age bands are unchanged.
 
-Estimates will not match official INSEE projections exactly. INSEE publishes age-by-age regional projections (https://www.insee.fr/fr/outil-interactif/5014911/pyramide.htm) that use demographic models and data not publicly available at this granularity. For real local estimates, use official INSEE reports. The extrapolations produced here represent the best approximation possible given the openly available data, but should be treated as indicative, not authoritative.
+## Accuracy and known limits
 
-The numbers below are validated by the integration test suite (`tests/test_integration.py`) using 2022 census vs 2022 quinquennal estimates.
+Output numbers are **indicative, not authoritative**. Every value can be traced to a published INSEE file, but the model makes assumptions that introduce error, especially at sub-department level and beyond 2–3 years from the census.
 
-### Quantified accuracy for ages 15-24
+Quick summary (ages 15–24, validated against INSEE pyramids):
 
-Comparison of model projections vs official INSEE pyramide data (`donnees_pyramide_act.csv`, national, M+F):
+| Level | What is exact | What drifts |
+|-------|--------------|-------------|
+| Department | Band totals (quinquennal-anchored, 0% error 2015–2026) | Individual ages (up to ±5% in 2026) |
+| EPCI | Aggregates to dept exactly; 625 EPCIs (100% coverage) | Sub-dept distribution (MOBSCO corrected, direction validated) |
+| IRIS | 100% pop coverage; ~60% has sub-commune spatial resolution | Same as EPCI + larger CI |
 
-#### 2026 per-age errors
-
-| Age | Model | Official | Error |
-|-----|------:|--------:|------:|
-| 15 | 858,697 | 885,211 | -3.0% |
-| 16 | 863,200 | 871,489 | -1.0% |
-| 17 | 864,491 | 868,144 | -0.4% |
-| 18 | 862,183 | 841,073 | +2.5% |
-| 19 | 861,066 | 833,790 | +3.3% |
-| 20 | 810,281 | 796,876 | +1.7% |
-| 21 | 816,153 | 784,282 | +4.1% |
-| 22 | 809,732 | 772,575 | +4.8% |
-| 23 | 792,602 | 781,668 | +1.4% |
-| 24 | 767,502 | 799,895 | -4.0% |
-| **Total** | **8,305,908** | **8,235,003** | **+0.9%** |
-
-#### Yearly totals (ages 15-24)
-
-| Year | Error | Notes |
-|------|------:|-------|
-| 2015-2022 | 0.0% | Exact match (quinquennal data available) |
-| 2023 | +0.1% | |
-| 2024 | +0.2% | |
-| 2025 | +0.3% | |
-| 2026 | +0.9% | Furthest from census year |
-
-#### Band-level accuracy (2026)
-
-| Band | Model vs official | Notes |
-|------|------------------:|-------|
-| 15_19 | +0.2% | Quinquennal anchoring keeps error very low |
-| 20_24 | +1.5% | Age-ratio drift from cohort-shifting over 4 years |
-
-The quinquennal estimates are used as-is for band totals (no census replacement). Census data provides only the age-ratio *shape* within each 5-year band. This limits national-level band error to ~1.5%. Individual age errors (up to ~5%) come from cohort-shifted age ratios drifting over time.
-
-### Census vs quinquennal discrepancy by age band
-
-At the department level, census aggregates and quinquennal estimates disagree for structural reasons (different survey timing, methodology, rounding). The discrepancy varies by age band:
-
-| Age band | Max dept-level discrepancy | Cause |
-|----------|---------------------------|-------|
-| 0_4, 5_9, 10_14 | ~10% | Sampling variance in small rural departments (e.g., Cantal, Jura) |
-| 15_19 | ~12% | Transitional — some lycee-related mobility |
-| 20_24 | ~20% | Strong student mobility: census counts residence, not study location |
-
-At the **national** level (summing all departments), discrepancy drops below **1.5%** for all bands, confirming the errors are spatially distributed, not systematic.
-
-The `20_24` band has the highest *median* department-level discrepancy — more than 2x the median of other bands — confirming student mobility as the dominant source of geographic misallocation.
-
-### Known biases
-
-1. **Structure-repeats hypothesis**: geographic ratios are frozen from the census year. Safe horizon is ~2-3 years; breaks near university towns, ANRU urban renewal zones, and areas with major residential developments.
-
-2. **Month ratio from births**: the monthly distribution is derived from birth data, which is accurate for ages 0-4 but increasingly approximate for older ages where seasonal patterns differ (e.g., student migration in September).
-
-3. **Student mobility correction**: uses MOBSCO commuting flows with per-department blend weights (capped at 0.6). Ile-de-France suburbs have the highest inter-departmental mobility (~50-62%) while university cities (Lyon, Toulouse, Bordeaux, Montpellier) have the lowest (~5-7%). The correction improves EPCI-level accuracy for 15_19 and 20_24 bands but cannot capture individual EPCI-level flows.
-
-4. **Mayotte (976)**: synthesized from quinquennal population estimates, not census microdata. Age distribution uses quinquennal band structure rather than individual-age census counts.
-
-5. **CAGR extension**: beyond the quinquennal data range, population is extended using compound annual growth rates clamped to +/-5%/year. Growth rates are computed from the last 5 years of pipeline output.
-
-### Pass Culture note
-
-The **18-25 age range at EPCI level** is the highest-risk zone for this model:
-- Student mobility is concentrated here (ages 18-24 move for university)
-- Structure-repeats hypothesis is weakest for this age range (high residential turnover)
-- EPCI adds ~3% geographic uncertainty on top of the temporal uncertainty
-- Confidence intervals reflect this: EPCI-level CI = department CI + 3%
-
-### Confidence intervals
-
-All output tables include `confidence_pct`, `population_low`, and `population_high` columns. The confidence percentage grows with distance from the census year and geographic granularity:
+Confidence intervals are included in all outputs (`confidence_pct`, `population_low`, `population_high`):
 
 | Census offset | Department | EPCI (+3%) | IRIS (+10%) |
 |---------------|-----------|------------|-------------|
-| 0-1 years | 2% | 5% | 12% |
-| 2-3 years | 3% | 6% | 13% |
-| 4+ years | 1% per year | +3% | +10% |
+| 0–1 years | 2% | 5% | 12% |
+| 2–3 years | 3% | 6% | 13% |
+| 4+ years | 1%/yr | +3% | +10% |
 
-Example: for census year 2022 projecting to 2028 (offset=6), department CI = 6%, EPCI CI = 9%, IRIS CI = 16%.
+**For the 18–25 age range at EPCI level** (Pass Culture's primary use case), error is highest: student mobility peaks here and geographic distributions shift fastest.
 
-### Geographic coverage
-
-| Level | Coverage | Detail |
-|-------|----------|--------|
-| Department | 100% | 96 metro + 4 DOM + Mayotte (synthesized from estimates) |
-| EPCI | ~100% | Direct commune-EPCI join + canton-weighted distribution for unmatched communes |
-| IRIS | ~60% | Only communes with IRIS subdivisions; urban depts (75, 69, 13) >70%, rural depts (23, 15, 46) <50% |
-
-### Projection consistency
-
-- Department yearly totals equal quinquennal values to within **0.1%** (ratio tables sum to 1 by construction)
-- Year-over-year national population changes are **< 3%** (catches scaling errors)
-- No NULL values in any critical column (year, month, department_code, age, sex, population)
-- All population values are strictly positive
-- Individual cells (month/dept/age/sex) stay within plausible bounds: max < 5,000, mean in [50, 1000]
-
-### EPCI and IRIS consistency
-
-- EPCI population summed by department is within **5%** of department totals
-- IRIS population summed by department never exceeds department totals by more than **1%**
+→ Full analysis of biases, validation methodology, and empirical findings: **[docs/accuracy_and_biases.md](docs/accuracy_and_biases.md)**
 
 ### Data source catalog
 

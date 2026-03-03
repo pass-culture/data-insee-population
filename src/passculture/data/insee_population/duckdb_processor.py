@@ -63,7 +63,7 @@ class PopulationProcessor:
     granularity:
     - population_department: 100% coverage, aggregated by department
     - population_epci: 100% coverage
-    - population_iris: ~60% coverage, only precise IRIS codes
+    - population_iris: 100% pop coverage; ~60% has sub-commune spatial resolution
 
     Example:
         processor = PopulationProcessor(year=2022, min_age=15, max_age=24,
