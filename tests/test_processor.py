@@ -1449,17 +1449,31 @@ class TestStudentMobilityCorrection:
 
         compute_geo_ratios(processor.conn, "epci")
 
-        # Create mock MOBSCO parquet
-        # Students from dept 75 study in commune 13001 (cross-dept)
-        # and commune 75102 (within-dept shift)
+        # Create mock MOBSCO parquet with both age groups:
+        #
+        # AGEREV10='18' (higher-ed / 20_24 band):
+        #   Dept 75 → 75101 students study cross-dept in 13001 (100 weighted)
+        #             AND within-dept in 75102 (60 weighted)
+        #   → mobility_rate for 20_24 ≈ 100/160 = 62.5% → capped at 0.60
+        #
+        # AGEREV10='15' (lycée / 15_19 band):
+        #   Dept 75 → 75101 students study within-dept only in 75102 (80 weighted)
+        #   → mobility_rate for 15_19 = 0% → blend_weight = 0 (uses default 0.10)
         mobsco_data = {
+            # HE students: cross-dept and within-dept flows
             "COMMUNE": ["75101"] * 4 + ["13001"] * 2,
             "DCETUF": ["13001", "13001", "75102", "75102", "13001", "13001"],
             "AGEREV10": ["18"] * 6,
             "SEXE": ["1", "2", "1", "2", "1", "2"],
             "IPONDI": ["50.0", "50.0", "30.0", "30.0", "80.0", "80.0"],
         }
-        # Add some non-student rows (should be filtered out)
+        # Lycée students: all within-dept (0% inter-dept)
+        mobsco_data["COMMUNE"].extend(["75101", "75101", "13001", "13001"])
+        mobsco_data["DCETUF"].extend(["75102", "75102", "13001", "13001"])
+        mobsco_data["AGEREV10"].extend(["15", "15", "15", "15"])
+        mobsco_data["SEXE"].extend(["1", "2", "1", "2"])
+        mobsco_data["IPONDI"].extend(["40.0", "40.0", "60.0", "60.0"])
+        # Non-student rows (should be filtered out — not in band_config)
         mobsco_data["COMMUNE"].extend(["75101", "75101"])
         mobsco_data["DCETUF"].extend(["13001", "13001"])
         mobsco_data["AGEREV10"].extend(["25", "30"])
@@ -1487,14 +1501,23 @@ class TestStudentMobilityCorrection:
         # Rename geo_ratios_epci to _base
         processor.conn.execute(sql.RENAME_GEO_RATIOS_EPCI_TO_BASE)
 
-        # Create student flows
+        from passculture.data.insee_population.projections import _build_band_config_sql
+
+        # Create student flows (now requires band_config_sql)
         processor.conn.execute(
-            sql.CREATE_STUDENT_FLOWS_EPCI.format(mobsco_path=mobsco_path)
+            sql.CREATE_STUDENT_FLOWS_EPCI.format(
+                mobsco_path=mobsco_path,
+                band_config_sql=_build_band_config_sql(),
+            )
         )
 
         flows = processor.conn.execute(
-            "SELECT * FROM student_flows_epci ORDER BY department_code, epci_code, sex"
+            "SELECT * FROM student_flows_epci"
+            " ORDER BY age_band, department_code, epci_code, sex"
         ).df()
+
+        # Flows must have an age_band column
+        assert "age_band" in flows.columns
 
         # Dept 75 students study in: 200054807 (13001) and 200054782 (75102)
         dept75_flows = flows[flows["department_code"] == "75"]
@@ -1504,11 +1527,13 @@ class TestStudentMobilityCorrection:
         dept13_flows = flows[flows["department_code"] == "13"]
         assert len(dept13_flows) > 0
 
-        # Ratios per dept/sex should sum to 1
-        for (dept, sex), group in flows.groupby(["department_code", "sex"]):
+        # Ratios per (dept, age_band, sex) should sum to 1
+        for (dept, band, sex), group in flows.groupby(
+            ["department_code", "age_band", "sex"]
+        ):
             ratio_sum = group["study_geo_ratio"].sum()
             assert abs(ratio_sum - 1.0) < 0.001, (
-                f"Flows for {dept}/{sex} sum to {ratio_sum}"
+                f"Flows for {dept}/{band}/{sex} sum to {ratio_sum}"
             )
 
         # Cleanup for next test
@@ -1516,13 +1541,19 @@ class TestStudentMobilityCorrection:
         processor.conn.execute("DROP TABLE student_flows_epci")
 
     def test_correction_shifts_weight(self, mobility_processor):
-        """Test that correction shifts geo_ratio weight for student bands."""
+        """Test that correction shifts geo_ratio for both student bands.
+
+        Dept 75 fixture:
+        - 20_24 (AGEREV10='18'): 62.5% cross-dept → w=0.60 → large shift.
+        - 15_19: lycée (AGEREV10='15') has 0% cross-dept, but secondary (higher-ed
+          AGEREV10='18') has 62.5% → effective_w = 0.75*0 + 0.25*0.625 = 0.15625.
+          Some 15_19 population now redistributes via higher-ed destination pattern.
+        """
         processor, mobsco_path = mobility_processor
         from passculture.data.insee_population.projections import (
             apply_student_mobility_correction,
         )
 
-        # Record baseline ratios for dept 75 before correction
         base_ratios_75 = processor.conn.execute("""
             SELECT epci_code, age_band, sex, geo_ratio
             FROM geo_ratios_epci
@@ -1530,10 +1561,8 @@ class TestStudentMobilityCorrection:
             ORDER BY epci_code, age_band, sex
         """).df()
 
-        # Apply correction
         apply_student_mobility_correction(processor.conn, mobsco_path)
 
-        # Get corrected ratios
         corrected_ratios_75 = processor.conn.execute("""
             SELECT epci_code, age_band, sex, geo_ratio
             FROM geo_ratios_epci
@@ -1541,25 +1570,31 @@ class TestStudentMobilityCorrection:
             ORDER BY epci_code, age_band, sex
         """).df()
 
-        # EPCI 200054782 (75102) should have INCREASED ratio for student bands
-        # because MOBSCO says students from 75101 study in 75102
-        for band in ["15_19", "20_24"]:
-            base_782 = base_ratios_75[
-                (base_ratios_75["epci_code"] == "200054782")
-                & (base_ratios_75["age_band"] == band)
-                & (base_ratios_75["sex"] == "male")
+        def get_ratio(df: object, epci: str, band: str, sex: str) -> float:
+            return df[
+                (df["epci_code"] == epci)
+                & (df["age_band"] == band)
+                & (df["sex"] == sex)
             ]["geo_ratio"].values[0]
 
-            corrected_782 = corrected_ratios_75[
-                (corrected_ratios_75["epci_code"] == "200054782")
-                & (corrected_ratios_75["age_band"] == band)
-                & (corrected_ratios_75["sex"] == "male")
-            ]["geo_ratio"].values[0]
+        # 20_24: HE students from 75101 study cross-dept (62% mobility → w=0.60)
+        # → EPCI 200054782 gains share, 200054781 loses share
+        assert get_ratio(corrected_ratios_75, "200054782", "20_24", "male") > get_ratio(
+            base_ratios_75, "200054782", "20_24", "male"
+        ), "20_24: EPCI 200054782 should gain ratio (students arrive)"
+        assert get_ratio(corrected_ratios_75, "200054781", "20_24", "male") < get_ratio(
+            base_ratios_75, "200054781", "20_24", "male"
+        ), "20_24: EPCI 200054781 should lose ratio (students leave)"
 
-            assert corrected_782 > base_782, (
-                f"EPCI 200054782 geo_ratio for {band}/male should increase: "
-                f"base={base_782:.4f}, corrected={corrected_782:.4f}"
-            )
+        # 15_19: effective_w=0.15625 (via higher-ed secondary component).
+        # Lycée flows go to 200054782; higher-ed flows go cross-dept (renorm effect).
+        # → 200054782 gains, 200054781 loses, but shift is smaller than 20_24.
+        assert get_ratio(corrected_ratios_75, "200054782", "15_19", "male") > get_ratio(
+            base_ratios_75, "200054782", "15_19", "male"
+        ), "15_19: 200054782 should gain ratio (lycée destination)"
+        assert get_ratio(corrected_ratios_75, "200054781", "15_19", "male") < get_ratio(
+            base_ratios_75, "200054781", "15_19", "male"
+        ), "15_19: 200054781 should lose ratio (renorm from cross-dept higher-ed)"
 
     def test_ratios_still_sum_to_one(self, mobility_processor):
         """After correction, geo_ratios per (dept, band, sex) still sum to ~1.0."""
@@ -1616,31 +1651,98 @@ class TestStudentMobilityCorrection:
             corrected_other.reset_index(drop=True),
         )
 
-    def test_blend_weight_varies_by_department(self, mobility_processor):
-        """Mobility weights should vary by department based on MOBSCO data."""
+    def test_blend_weight_varies_by_department_and_band(self, mobility_processor):
+        """Mobility weights vary by (department, age_band) based on MOBSCO data."""
         processor, _mobsco_path = mobility_processor
 
         weights = processor.conn.execute("""
-            SELECT department_code, blend_weight, mobility_rate
+            SELECT age_band, department_code, blend_weight, mobility_rate
             FROM mobility_weights
-            ORDER BY department_code
+            ORDER BY age_band, department_code
         """).df()
 
-        # Dept 75: students from 75101 study in 13001 (cross-dept) and 75102
-        # → has inter-departmental mobility (50+50 out of 50+50+30+30 = 100/160)
-        dept_75 = weights[weights["department_code"] == "75"]
-        assert len(dept_75) == 1
-        assert dept_75["mobility_rate"].values[0] > 0  # has cross-dept flows
+        # mobility_weights must have age_band column
+        assert "age_band" in weights.columns
 
-        # Dept 13: all students study within dept 13 (commune 13001)
-        # → 0% inter-departmental mobility
-        dept_13 = weights[weights["department_code"] == "13"]
-        assert len(dept_13) == 1
-        assert dept_13["mobility_rate"].values[0] == 0.0
+        # Dept 75, 20_24 band: HE students from 75101 study cross-dept in 13001
+        # → mobility_rate ≈ 100/160 = 62.5%, capped at 0.60
+        w75_he = weights[
+            (weights["department_code"] == "75") & (weights["age_band"] == "20_24")
+        ]
+        assert len(w75_he) == 1
+        assert w75_he["mobility_rate"].values[0] > 0
+        assert w75_he["blend_weight"].values[0] <= 0.60
 
-        # Blend weights should differ between departments
-        assert dept_75["blend_weight"].values[0] != dept_13["blend_weight"].values[0], (
-            "Blend weights should differ between departments with different mobility"
+        # Dept 75, 15_19 band: lycée students (AGEREV10='15') have 0% cross-dept.
+        # But the effective rate mixes primary (0%) and secondary (higher-ed, ~62.5%):
+        #   effective = (1-0.25)*0 + 0.25*0.625 = 0.15625
+        # blend_weight = min(0.15625, cap=0.25) = 0.15625
+        w75_ly = weights[
+            (weights["department_code"] == "75") & (weights["age_band"] == "15_19")
+        ]
+        assert len(w75_ly) == 1
+        assert w75_ly["mobility_rate"].values[0] == pytest.approx(0.15625)
+        assert w75_ly["blend_weight"].values[0] == pytest.approx(0.15625)
+
+        # Dept 13, both bands: all students study within dept → mobility_rate = 0
+        for band in ["15_19", "20_24"]:
+            w13 = weights[
+                (weights["department_code"] == "13") & (weights["age_band"] == band)
+            ]
+            assert len(w13) == 1
+            assert w13["mobility_rate"].values[0] == 0.0
+
+        # 20_24 blend weight should be higher than 15_19 for dept 75
+        assert w75_he["blend_weight"].values[0] > w75_ly["blend_weight"].values[0], (
+            "Higher-ed blend weight should exceed lycée blend weight for dept 75"
+        )
+
+    def test_correction_magnitude_differs_by_band(self, mobility_processor):
+        """15_19 correction should be smaller than 20_24 when lycée mobility is zero."""
+        processor, mobsco_path = mobility_processor
+        from passculture.data.insee_population.projections import (
+            apply_student_mobility_correction,
+        )
+
+        base = processor.conn.execute("""
+            SELECT epci_code, age_band, sex, geo_ratio
+            FROM geo_ratios_epci
+            WHERE department_code = '75'
+            ORDER BY epci_code, age_band, sex
+        """).df()
+
+        apply_student_mobility_correction(processor.conn, mobsco_path)
+
+        corrected = processor.conn.execute("""
+            SELECT epci_code, age_band, sex, geo_ratio
+            FROM geo_ratios_epci
+            WHERE department_code = '75'
+            ORDER BY epci_code, age_band, sex
+        """).df()
+
+        # Compute absolute shift per band for EPCI 200054782 / male
+        def shift(band: str) -> float:
+            b = base[
+                (base["epci_code"] == "200054782")
+                & (base["age_band"] == band)
+                & (base["sex"] == "male")
+            ]["geo_ratio"].values[0]
+            c = corrected[
+                (corrected["epci_code"] == "200054782")
+                & (corrected["age_band"] == band)
+                & (corrected["sex"] == "male")
+            ]["geo_ratio"].values[0]
+            return abs(c - b)
+
+        shift_15_19 = shift("15_19")
+        shift_20_24 = shift("20_24")
+
+        # The 15_19 correction uses lycée mobility rate (0%) → default weight (0.10)
+        # The 20_24 correction uses HE mobility rate (~62%) → capped weight (0.60)
+        # So 20_24 should shift more than 15_19
+        assert shift_20_24 > shift_15_19, (
+            f"20_24 shift ({shift_20_24:.4f}) should exceed"
+            f" 15_19 shift ({shift_15_19:.4f})"
         )
 
 
@@ -1947,15 +2049,23 @@ class TestIRISStudentMobilityCorrection:
         """Test that student_flows_iris table has expected IRIS codes."""
         processor, mobsco_path = iris_mobility_processor
         from passculture.data.insee_population import sql
+        from passculture.data.insee_population.projections import _build_band_config_sql
 
         processor.conn.execute(sql.RENAME_GEO_RATIOS_IRIS_TO_BASE)
         processor.conn.execute(
-            sql.CREATE_STUDENT_FLOWS_IRIS.format(mobsco_path=mobsco_path)
+            sql.CREATE_STUDENT_FLOWS_IRIS.format(
+                mobsco_path=mobsco_path,
+                band_config_sql=_build_band_config_sql(),
+            )
         )
 
         flows = processor.conn.execute(
-            "SELECT * FROM student_flows_iris ORDER BY department_code, iris_code, sex"
+            "SELECT * FROM student_flows_iris"
+            " ORDER BY age_band, department_code, iris_code, sex"
         ).df()
+
+        # Flows must have age_band column
+        assert "age_band" in flows.columns
 
         # Should have IRIS codes from the study communes
         iris_codes = flows["iris_code"].unique().tolist()
@@ -1966,11 +2076,19 @@ class TestIRISStudentMobilityCorrection:
             f"Expected 130010101 in flows, got {iris_codes}"
         )
 
-        # Ratios per dept/sex should sum to ~1
-        for (dept, sex), group in flows.groupby(["department_code", "sex"]):
+        # iris_dept column must be present (used by blended_raw to filter intra-dept
+        # flows)
+        assert "iris_dept" in flows.columns, (
+            "student_flows_iris must have iris_dept column"
+        )
+
+        # Ratios per (dept, age_band, sex) should sum to ~1
+        for (dept, band, sex), group in flows.groupby(
+            ["department_code", "age_band", "sex"]
+        ):
             ratio_sum = group["study_geo_ratio"].sum()
             assert abs(ratio_sum - 1.0) < 0.001, (
-                f"IRIS flows for {dept}/{sex} sum to {ratio_sum}"
+                f"IRIS flows for {dept}/{band}/{sex} sum to {ratio_sum}"
             )
 
         # Cleanup
@@ -1978,7 +2096,17 @@ class TestIRISStudentMobilityCorrection:
         processor.conn.execute("DROP TABLE student_flows_iris")
 
     def test_iris_correction_shifts_weight(self, iris_mobility_processor):
-        """Test that correction shifts geo_ratio weight for student bands."""
+        """Test that correction shifts geo_ratio weight for student bands.
+
+        Fixture: dept 75 students (AGEREV10='18', 20_24 band) go to:
+        - Marseille (dept 13, commune 13001): 62.5% of total flows (cross-dept)
+        - Local (commune 75102, IRIS 751020101): 37.5% of total flows (intra-dept)
+
+        Intra-dept fraction p = 0.375, blend_weight w = 0.6, effective w*p = 0.225.
+        Expected ratios (both sum to 1.0):
+        - 751010101: (1-0.225)*0.5 + 0 = 0.3875  (no intra-dept study destination)
+        - 751020101: (1-0.225)*0.5 + 0.6*0.375 = 0.6125  (intra-dept study destination)
+        """
         processor, mobsco_path = iris_mobility_processor
         from passculture.data.insee_population.projections import (
             apply_student_mobility_correction_iris,
@@ -2001,25 +2129,76 @@ class TestIRISStudentMobilityCorrection:
             ORDER BY iris_code, age_band, sex
         """).df()
 
-        # IRIS 751020101 (commune 75102) should increase for student bands
-        # because MOBSCO says students study in commune 75102
-        for band in ["15_19", "20_24"]:
-            base_val = base_ratios[
-                (base_ratios["iris_code"] == "751020101")
-                & (base_ratios["age_band"] == band)
-                & (base_ratios["sex"] == "male")
+        def get_ratio(df: object, iris: str, band: str, sex: str) -> float:
+            return df[
+                (df["iris_code"] == iris)
+                & (df["age_band"] == band)
+                & (df["sex"] == sex)
             ]["geo_ratio"].values[0]
 
-            corrected_val = corrected_ratios[
-                (corrected_ratios["iris_code"] == "751020101")
-                & (corrected_ratios["age_band"] == band)
-                & (corrected_ratios["sex"] == "male")
-            ]["geo_ratio"].values[0]
+        # 20_24: IRIS 751020101 is an intra-dept study destination → gains ratio
+        assert get_ratio(corrected_ratios, "751020101", "20_24", "male") > get_ratio(
+            base_ratios, "751020101", "20_24", "male"
+        ), "20_24: IRIS 751020101 should gain ratio (intra-dept study destination)"
 
-            assert corrected_val > base_val, (
-                f"IRIS 751020101 geo_ratio for {band}/male should increase: "
-                f"base={base_val:.4f}, corrected={corrected_val:.4f}"
-            )
+        # 751010101 has no intra-dept study flows → loses ratio
+        assert get_ratio(corrected_ratios, "751010101", "20_24", "male") < get_ratio(
+            base_ratios, "751010101", "20_24", "male"
+        ), "20_24: IRIS 751010101 should lose ratio (no intra-dept study destination)"
+
+        # 15_19: fixture has no AGEREV10='15' rows → primary is empty.
+        # Secondary (AGEREV10='18') flows renorm to full distribution.
+        # blend_weight = default 0.10 (no primary data); intra_frac = 0.375.
+        # Effective w*p = 0.0375 → small shift same direction as 20_24.
+        assert get_ratio(corrected_ratios, "751020101", "15_19", "male") > get_ratio(
+            base_ratios, "751020101", "15_19", "male"
+        ), "15_19: 751020101 should gain (intra-dept study destination via secondary)"
+        assert get_ratio(corrected_ratios, "751010101", "15_19", "male") < get_ratio(
+            base_ratios, "751010101", "15_19", "male"
+        ), "15_19: 751010101 should lose (cross-dept renorm effect via secondary)"
+
+    def test_iris_intra_dept_effective_weight(self, iris_mobility_processor):
+        """Effective blend weight scales by intra-dept fraction to prevent IRIS
+        inflation.
+
+        When most students leave for another department (cross-dept), the effective
+        correction weight w*p is smaller than the raw blend_weight w. This prevents
+        local IRIS ratios from being inflated by the renormalization step.
+
+        In the fixture: p=0.375, w=0.6 → effective w*p=0.225.
+        - 751010101: (1-0.225)*0.5 = 0.3875  (approx)
+        - 751020101: (1-0.225)*0.5 + 0.6*0.375 = 0.6125  (approx)
+        - Sum = 1.0 (preserved, no inflation)
+        """
+        processor, mobsco_path = iris_mobility_processor
+        from passculture.data.insee_population.projections import (
+            apply_student_mobility_correction_iris,
+        )
+
+        apply_student_mobility_correction_iris(processor.conn, mobsco_path)
+
+        corrected = processor.conn.execute("""
+            SELECT iris_code, geo_ratio
+            FROM geo_ratios_iris
+            WHERE department_code = '75' AND age_band = '20_24' AND sex = 'male'
+            ORDER BY iris_code
+        """).df()
+
+        def ratio(iris_code: str) -> float:
+            return corrected[corrected["iris_code"] == iris_code]["geo_ratio"].values[0]
+
+        # p=0.375, w=0.6, w*p=0.225; base ratio = 0.5 for both IRIS
+        assert ratio("751010101") == pytest.approx(0.3875, abs=0.001), (
+            "IRIS 751010101: expected (1-0.225)*0.5 = 0.3875"
+        )
+        assert ratio("751020101") == pytest.approx(0.6125, abs=0.001), (
+            "IRIS 751020101: expected (1-0.225)*0.5 + 0.6*0.375 = 0.6125"
+        )
+        # Sum must be 1.0 (no inflation from cross-dept flows)
+        total = corrected["geo_ratio"].sum()
+        assert abs(total - 1.0) < 0.001, (
+            f"Dept 75 20_24 male IRIS ratios must sum to 1.0, got {total}"
+        )
 
     def test_iris_ratios_still_sum_to_one(self, iris_mobility_processor):
         """After correction, geo_ratios_iris per (dept, band, sex) sum to ~1.0."""

@@ -32,8 +32,11 @@ from passculture.data.insee_population.constants import (
     IRIS_SENTINEL_MASKED_SUFFIX,
     IRIS_SENTINEL_NO_GEO,
     MAX_AGE,
-    STUDENT_MOBILITY_BLEND_CAP,
-    STUDENT_MOBILITY_BLEND_DEFAULT,
+    STUDENT_BAND_AGEREV10,
+    STUDENT_BAND_AGEREV10_SECONDARY,
+    STUDENT_BAND_SECONDARY_WEIGHT,
+    STUDENT_MOBILITY_BLEND_CAP_BY_BAND,
+    STUDENT_MOBILITY_BLEND_DEFAULT_BY_BAND,
 )
 
 if TYPE_CHECKING:
@@ -343,16 +346,41 @@ def project_multi_year(
     )
 
 
+def _build_band_config_sql() -> str:
+    """Build the SQL VALUES block mapping age_band → AGEREV10, cap, default.
+
+    Includes secondary_agerev10 and secondary_weight for bands with a mixed
+    population (e.g. 15_19 uses 75% lycée + 25% higher-ed flows).
+
+    Returns a UNION ALL of SELECT rows for use in a band_config CTE.
+    """
+    rows = []
+    for band, agerev10 in STUDENT_BAND_AGEREV10.items():
+        cap = STUDENT_MOBILITY_BLEND_CAP_BY_BAND[band]
+        default = STUDENT_MOBILITY_BLEND_DEFAULT_BY_BAND[band]
+        secondary = STUDENT_BAND_AGEREV10_SECONDARY.get(band)
+        sec_weight = STUDENT_BAND_SECONDARY_WEIGHT.get(band, 0.0)
+        secondary_sql = f"'{secondary}'" if secondary else "NULL"
+        rows.append(
+            f"SELECT '{band}' AS age_band, '{agerev10}' AS agerev10, "
+            f"{cap} AS blend_cap, {default} AS blend_default, "
+            f"{secondary_sql} AS secondary_agerev10, {sec_weight} AS secondary_weight"
+        )
+    return "\n    UNION ALL\n    ".join(rows)
+
+
 def compute_department_mobility_rates(
     conn: duckdb.DuckDBPyConnection,
     mobsco_path: Path,
 ) -> None:
-    """Compute per-department student inter-departmental mobility rates.
+    """Compute per-department, per-age-band student inter-departmental mobility rates.
 
-    For each department, computes the fraction of students (AGEREV10='18',
-    ages 18-24) who study in a different department. Creates a
-    `mobility_weights` table with `blend_weight = min(mobility_rate, CAP)`,
-    falling back to BLEND_DEFAULT for departments not in MOBSCO.
+    For each (department, age_band) pair, computes the fraction of students in
+    that band who study in a different department, using the MOBSCO AGEREV10
+    group appropriate for that band (AGEREV10='15' for lycée-age 15_19,
+    AGEREV10='18' for higher-ed 20_24). Creates a `mobility_weights` table with
+    `blend_weight = min(mobility_rate, per-band cap)`, falling back to a
+    per-band default for departments not in MOBSCO.
 
     Requires `commune_epci` table to exist (for dept lookup from commune).
 
@@ -363,12 +391,11 @@ def compute_department_mobility_rates(
     conn.execute(
         sql.CREATE_MOBILITY_WEIGHTS.format(
             mobsco_path=mobsco_path,
-            blend_default=STUDENT_MOBILITY_BLEND_DEFAULT,
-            blend_cap=STUDENT_MOBILITY_BLEND_CAP,
+            band_config_sql=_build_band_config_sql(),
         )
     )
     count = conn.execute("SELECT COUNT(*) FROM mobility_weights").fetchone()[0]
-    logger.debug("  Mobility weights: {} departments", count)
+    logger.debug("  Mobility weights: {} (dept, band) pairs", count)
 
 
 def apply_student_mobility_correction(
@@ -394,8 +421,13 @@ def apply_student_mobility_correction(
     # 1. Rename existing geo_ratios_epci to _base
     conn.execute(sql.RENAME_GEO_RATIOS_EPCI_TO_BASE)
 
-    # 2. Compute student flows from MOBSCO
-    conn.execute(sql.CREATE_STUDENT_FLOWS_EPCI.format(mobsco_path=mobsco_path))
+    # 2. Compute student flows from MOBSCO (per age band)
+    conn.execute(
+        sql.CREATE_STUDENT_FLOWS_EPCI.format(
+            mobsco_path=mobsco_path,
+            band_config_sql=_build_band_config_sql(),
+        )
+    )
     flow_count = conn.execute("SELECT COUNT(*) FROM student_flows_epci").fetchone()[0]
     flow_depts = conn.execute(
         "SELECT COUNT(DISTINCT department_code) FROM student_flows_epci"
@@ -438,8 +470,13 @@ def apply_student_mobility_correction_iris(
     # 1. Rename existing geo_ratios_iris to _base
     conn.execute(sql.RENAME_GEO_RATIOS_IRIS_TO_BASE)
 
-    # 2. Compute student flows from MOBSCO at IRIS level
-    conn.execute(sql.CREATE_STUDENT_FLOWS_IRIS.format(mobsco_path=mobsco_path))
+    # 2. Compute student flows from MOBSCO at IRIS level (per age band)
+    conn.execute(
+        sql.CREATE_STUDENT_FLOWS_IRIS.format(
+            mobsco_path=mobsco_path,
+            band_config_sql=_build_band_config_sql(),
+        )
+    )
     flow_count = conn.execute("SELECT COUNT(*) FROM student_flows_iris").fetchone()[0]
     flow_depts = conn.execute(
         "SELECT COUNT(DISTINCT department_code) FROM student_flows_iris"

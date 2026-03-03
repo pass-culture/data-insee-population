@@ -109,7 +109,7 @@ def population(
     Creates three parquet files with monthly granularity:
     - population_department.parquet (100% coverage)
     - population_epci.parquet (100% coverage)
-    - population_iris.parquet (~60% coverage, exact only)
+    - population_iris.parquet (100% pop coverage; ~60% has sub-commune resolution)
 
     Examples:
 
@@ -271,8 +271,8 @@ def info() -> None:
     console.print("\n  [bold]population_canton.parquet[/bold] (~100% coverage)")
     console.print("    Aggregated by canton")
 
-    console.print("\n  [bold]population_iris.parquet[/bold] (~60% coverage)")
-    console.print("    Fine-grained IRIS level - only precise data")
+    console.print("\n  [bold]population_iris.parquet[/bold] (100% pop; ~60% spatial)")
+    console.print("    IRIS level: rural communes have 1 IRIS = commune estimate")
 
     console.print("\n[bold blue]Columns[/bold blue]")
     console.print(

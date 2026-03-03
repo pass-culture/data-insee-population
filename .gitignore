@@ -47,6 +47,9 @@ dashboard/public/dsfr/
 # Temporary files
 .tmp/
 
+# Local backlog (not for collaboration, tracked locally only)
+.backlog/
+
 # Claude Code
 .claude/
 

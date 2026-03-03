@@ -60,9 +60,48 @@ MOBSCO_URL = (
 
 # Student mobility correction constants for EPCI/IRIS geo ratios
 # corrected = (1 - w) * census_ratio + w * study_ratio, for 15_19/20_24 bands
-# Default blend weight (fallback for departments not in MOBSCO)
+
+# MOBSCO AGEREV10 code used per age band.
+# AGEREV10='15' covers lycée-age students (~15-17, seconde/première/terminale).
+# AGEREV10='18' covers higher-education students (~18-24).
+# Using '18' for both bands (old behaviour) over-corrects lycée ages.
+STUDENT_BAND_AGEREV10: dict[str, str] = {
+    "15_19": "15",
+    "20_24": "18",
+}
+
+# Secondary AGEREV10 for mixed-population bands.
+# Ages 18-19 within the 15_19 band (~25% of band population) are in higher
+# education and follow higher-ed mobility patterns (AGEREV10='18'), not lycée.
+# The secondary weight controls how much of the 15_19 study flow uses higher-ed
+# patterns vs lycée patterns. None = no secondary component.
+STUDENT_BAND_AGEREV10_SECONDARY: dict[str, str | None] = {
+    "15_19": "18",  # 18-19 year olds in higher education
+    "20_24": None,  # pure higher-ed band, no secondary needed
+}
+
+# Fraction of the 15_19 band population that follows higher-ed mobility patterns.
+# ~2/5 ages are 18-19; ~60% of those are in higher education -> ~25%.
+STUDENT_BAND_SECONDARY_WEIGHT: dict[str, float] = {
+    "15_19": 0.25,
+    "20_24": 0.0,
+}
+
+# Per-band blend caps: lycée mobility is nearly zero across departments;
+# higher-ed reaches 60% in IDF suburbs.
+STUDENT_MOBILITY_BLEND_CAP_BY_BAND: dict[str, float] = {
+    "15_19": 0.25,
+    "20_24": 0.60,
+}
+
+# Per-band defaults for departments absent from MOBSCO.
+STUDENT_MOBILITY_BLEND_DEFAULT_BY_BAND: dict[str, float] = {
+    "15_19": 0.10,
+    "20_24": 0.30,
+}
+
+# Kept for reference / backward compatibility
 STUDENT_MOBILITY_BLEND_DEFAULT = 0.3
-# Maximum blend weight to prevent over-correction in high-mobility departments
 STUDENT_MOBILITY_BLEND_CAP = 0.6
 
 # Population estimates by age quinquennial (5-year bands) by department
@@ -140,7 +179,8 @@ CI_EXTRA_IRIS = 0.10  # additional uncertainty for IRIS geo_ratio
 # CAGR computed on final projected output extends the series.
 MAX_CAGR_EXTENSION = 10
 
-# Age bands affected by student mobility correction (MOBSCO)
+# Age bands affected by student mobility correction (MOBSCO).
+# Order must match STUDENT_BAND_AGEREV10 keys.
 STUDENT_AGE_BANDS = ("15_19", "20_24")
 
 # IRIS sentinel values in INDCVI census data
