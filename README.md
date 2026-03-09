@@ -8,7 +8,7 @@ Part of the `passculture.data.*` namespace — reusable as a library in other ET
 
 **This tool is not a demographic projection model.** It combines several official INSEE publications, each authoritative at a different granularity, and multiplies compatible ratios to produce a single consistent table. Every number in the output can be traced back to a published INSEE file.
 
-It is designed to extend recent trends over a short horizon (~5 years beyond the last INSEE estimates) and provide department- and EPCI-level detail for tracking population movements. Beyond that horizon, accuracy degrades quickly. For real long-term population projections, use the official INSEE projection tool: https://www.insee.fr/fr/outil-interactif/5896897/pyramide.htm
+It is designed to extend recent trends over a short horizon (~5 years beyond the last INSEE estimates) and provide department- and EPCI-level detail for tracking population movements. Beyond that horizon, accuracy degrades quickly. For real long-term population projections, use the [official INSEE projection tool](https://www.insee.fr/fr/outil-interactif/5896897/pyramide.htm) or the [Regional interactive pyramids](https://www.insee.fr/fr/outil-interactif/5014911/pyramide.html)
 
 ### Source files
 
