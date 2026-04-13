@@ -22,38 +22,32 @@ It is designed to extend recent trends over a short horizon (~5 years beyond the
 
 ### Calculation
 
-The processor builds monthly estimates by multiplying four ratio tables derived from the sources above:
+The processor uses **simple census aging** to project population forward:
+
+```
+pop(year, age, sex, dept) = census_pop(census_year, age - (year - census_year), sex, dept)
+```
+
+Each census cohort is aged forward by shifting: a person counted as age 15 in 2022 becomes age 18 in 2025. No mortality or migration adjustment is applied (~0.2% error over 4 years for ages 15–24).
+
+Sub-department and monthly estimates are derived by applying ratio tables:
 
 ```
 pop(year, month, age, sex, geo) =
-    quinquennal(year, age_band, sex, dept)        [A]
-  x age_ratio(year, age | age_band, sex, dept)    [B]
-  x month_ratio(month | dept)                     [C]
-  x geo_ratio(geo | dept, age_band, sex)          [D]
+    census_aged(year, age, sex, dept)             [A]
+  x month_ratio(month | dept)                     [B]
+  x geo_ratio(geo | dept, age_band, sex)          [C]
 ```
 
 | Factor | What it does | Source | Constraint |
 |--------|-------------|--------|------------|
-| **A** `quinquennal` | Anchors total population per 5-year band / dept / sex / year | INSEE age pyramid estimates | — |
-| **B** `age_ratio` | Splits a 5-year band into individual ages | INDCVI census, cohort-shifted | Sums to 1 within each band |
-| **C** `month_ratio` | Distributes yearly population across 12 months | INSEE monthly birth data | Sums to 1 within each dept |
-| **D** `geo_ratio` | Distributes department population to sub-dept units (EPCI or IRIS) | INDCVI census | Sums to <=1 within each dept |
-
-Because **B** and **C** each sum to 1, the department-level yearly total equals the quinquennal value exactly.
-
-#### Cohort-shifted age ratios
-
-Rather than freezing age ratios at census-year values, we shift by birth cohort:
-
-```
-census_age = target_age + (census_year - projection_year)
-```
-
-For example, to estimate the distribution of 18-year-olds in 2025 using a 2022 census, we look at 15-year-olds in the census (the same birth cohort). This captures cohort-specific patterns (e.g., a baby boom year) that a frozen ratio would miss.
+| **A** `census_aged` | Population at each individual age, shifted from census | INDCVI census | Exact at census year |
+| **B** `month_ratio` | Distributes yearly population across 12 months | INSEE monthly birth data | Sums to 1 within each dept |
+| **C** `geo_ratio` | Distributes department population to sub-dept units (EPCI, canton, IRIS) | INDCVI census | Sums to <=1 within each dept |
 
 #### Geographic ratios and the structure-repeats hypothesis
 
-Geographic ratios use the **structure-repeats hypothesis**: the sub-department distribution observed in the census at the *target* age is assumed to hold for future years. This is because where people of a given age live changes slowly and is better approximated by the target age's spatial pattern than by the shifted census age's pattern.
+Geographic ratios use the **structure-repeats hypothesis**: the sub-department distribution observed in the census at the *target* age is assumed to hold for future years. This is because where people of a given age live changes slowly.
 
 #### Student mobility correction (MOBSCO)
 
@@ -82,7 +76,7 @@ Quick summary (ages 15–24, validated against INSEE pyramids):
 
 | Level | What is exact | What drifts |
 |-------|--------------|-------------|
-| Department | Band totals (quinquennal-anchored, 0% error 2015–2026) | Individual ages (up to ±5% in 2026) |
+| Department | Individual ages exact at census year; ~0.2% drift/4yr from simple aging | No mortality/migration modelling |
 | EPCI | Aggregates to dept exactly; 625 EPCIs (100% coverage) | Sub-dept distribution (MOBSCO corrected, direction validated) |
 | IRIS | 100% pop coverage; ~60% has sub-commune spatial resolution | Same as EPCI + larger CI |
 

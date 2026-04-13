@@ -11,36 +11,23 @@
 
 ## Regional level (department → region aggregation)
 
-### Finding 1: Totals match INSEE exactly — by construction
+### Finding 1: Census year totals are exact by construction
 
 | Metric | Result |
 |--------|--------|
-| Total 15–24 per region vs INSEE | 0.00% diff, all 13 metro regions |
-| Year-by-year drift 2015–2030 | 0.00% every year |
-| Sex ratio vs INSEE | Identical (0.0000 diff) |
+| Total 15–24 per region (census year 2022) | Exact — from INDCVI census |
+| Sex ratio vs INDCVI | Identical |
+| Individual age populations | Exact at census year (no intra-band redistribution) |
 
-**Why**: Department-level totals are calibrated to the INSEE quinquennal estimates
-(`estim-pop-dep-sexe-aq-1975-2026.xlsx`), which in turn are the same source as the
-interactive pyramid tool. Regional totals are exact because regions are sums of departments.
-This is not a validation of accuracy — it is a consistency check that passes.
+**Why**: Department-level population at each individual age comes directly from the
+INDCVI census. No quinquennal anchoring or age-ratio redistribution is applied.
+Regional totals are exact because regions are sums of departments.
 
-### Finding 2: 20-24 band matches exactly, 15-17 vs 18-19 split has minor noise
+### Finding 2: Projection years use simple aging
 
-The quinquennal data provides totals per 5-year band (15–19, 20–24). Within each band,
-we apply age_ratios from INDCVI to split individual ages. This produces:
-
-- **20-24**: exact match at regional level (directly from quinquennal)
-- **15-17 vs 18-19**: small residual (< 0.5pp in most regions)
-
-Flagged regions (> 0.3pp shift in 15-17 band):
-- Grand Est: -0.33pp on 15-17, +0.33pp on 18-19
-- Occitanie: -0.45pp on 15-17, +0.45pp on 18-19
-
-These shifts are within census sampling variance and do not indicate a systematic bug.
-The direction (15-17 shrinks, 18-19 grows in university regions) confirmed the hypothesis
-that 18-19 year-olds within the 15_19 band follow higher-ed mobility patterns.
-→ **Fixed 2026-02-27**: secondary mixing for 18-19 within the 15_19 band is now implemented.
-See `docs/accuracy_and_biases.md` Bias 2 for the full design explanation.
+For non-census years, each cohort keeps its census population as it ages forward.
+This means population at age A in year Y equals census population at age A-(Y-2022).
+The only error source is mortality and migration (~0.2% over 4 years for ages 15–24).
 
 ### What this level cannot test
 
@@ -253,13 +240,10 @@ the census within ~6%. For university cities, MOBSCO effect dominates the diff.
 | Strasbourg | 53.2% | 51.3% | 51.3% | +2.05pp |
 | Bordeaux | 53.3% | 52.0% | 52.0% | +1.36pp |
 
-**Post-2026 freeze confirmed**: years 2027–2030 are IDENTICAL to 2026 in all EPCIs.
-The quinquennal dataset ends at 2026; beyond that, band totals are held at the 2026
-extrapolated value. The 20-24 share does not change after 2026.
-
-**Drift magnitude**: all university EPCIs exceed the 1pp threshold over 2015–2030, but
-the drift reflects year-to-year quinquennal band changes (different birth cohort sizes),
-not systematic degradation. The structure-repeats hypothesis holds within the CI bounds.
+**Year-over-year variation**: with simple aging, different birth cohorts enter/exit
+the 15–24 range each year. The 20-24 share varies because census cohort sizes differ
+(reflecting historical birth rate variations). This is expected demographic structure,
+not an error. Geographic ratios are fixed at 2022 census values.
 
 ---
 

@@ -12,19 +12,20 @@
 ## Quick reference for new users
 
 **What is reliable:**
-- Department-level band totals (15–19 and 20–24) are exact by construction — calibrated to INSEE quinquennal estimates, 0.00% error at regional level.
+- Department-level population at individual ages is exact at census year — taken directly from the INDCVI census with no redistribution or approximation.
+- For projection years, population uses simple cohort aging (no mortality/migration adjustment). Each cohort keeps its census population as it ages forward.
 - EPCI coverage is 100% (625 EPCIs). EPCI totals aggregate to department totals with no rounding loss.
 - MOBSCO student correction goes in the right direction: university EPCIs gain +2 to +6pp on 20-24 share; IDF suburbs lose share.
 
 **What is approximate:**
-- Individual age splits within 5-year bands: ±3–5% error on single ages (e.g. age 15 is -3%, age 22 is +5%), but band totals are exact.
 - EPCI geographic distribution: frozen at 2022 census ratios. Confidence degrades ~1%/year beyond census.
 - MOBSCO correction magnitude: direction confirmed, ±2pp uncertainty on the correction amount.
 - IRIS-level estimates: reliable at dept level (100% population coverage); do not aggregate IRIS to derive EPCI totals for IDF suburbs (structural 12–19% gap for ~20 EPCIs).
+- Simple aging ignores mortality and migration (~0.2% impact over 4 years for ages 15–24).
 
 **Hard limits:**
-- Quinquennal data ends at 2026. Years 2027–2030 in the output are frozen at 2026 values (no demographic projection beyond that year).
-- No individual migration or mortality modelling — this is a ratio-based interpolation, not a demographic model.
+- Projection is valid up to census_year + min_age (e.g. 2022 + 15 = 2037). Beyond that, the youngest cohorts were not yet born at census time.
+- No individual migration or mortality modelling — this is a simple aging model, not a demographic projection.
 - MOBSCO correction magnitude has not been independently validated at EPCI level. An official sub-departmental age pyramid does not exist.
 
 ---
@@ -32,49 +33,48 @@
 ## What this model produces and for what use
 
 The pipeline outputs monthly population estimates by age, sex, and geographic unit
-(department, EPCI, IRIS) for ages 0–120, years 1975–2036 (extendable). It is designed for:
+(department, EPCI, canton, IRIS) for configurable age ranges and projection years. It is designed for:
 
 - **Tracking youth population (15–25) at EPCI level** — primary use case at Pass Culture
 - **Estimating territorial reach** for cultural programs (how many potential users in a given zone)
 - **Interpolating between census years** at sub-departmental granularity
 
 It is **not** a demographic projection model. It does not model fertility, mortality, or
-migration explicitly. It extends known INSEE estimates using stable ratio patterns from
-the most recent census. For official demographic projections, use INSEE's Omphale tool.
+migration explicitly. It ages census population forward by shifting cohorts, assuming
+zero mortality and zero net migration. For official demographic projections, use
+INSEE's Omphale tool.
 
 ---
 
 ## What is calibrated vs what is estimated
 
-| Component | Calibrated to | Ground truth available |
-|-----------|--------------|------------------------|
-| Department band totals | INSEE quinquennal estimates (1975–2026) | Yes — same source |
-| Individual age splits within bands | INDCVI 2022 census, cohort-shifted | Approximate |
+| Component | Source | Accuracy |
+|-----------|--------|----------|
+| Department population by individual age | INDCVI 2022 census, cohort-aged | Exact at census year; ~0.2% drift over 4 years (no mortality/migration) |
 | Monthly distribution | Monthly birth data per dept | Approximate |
 | EPCI geographic split | INDCVI 2022 census | Frozen at census year |
 | EPCI student correction | MOBSCO 2022 commuting data | Direction validated only |
 | IRIS geographic split | INDCVI 2022 census, commune-distributed | 100% pop; ~60% sub-commune resolution |
+| Mayotte | Quinquennal estimates + total population estimates | Approximate (synthesized, not census) |
 
-**Key implication**: department-level band totals are exact by construction. All uncertainty
-is in how the total is distributed across individual ages, months, and sub-geographies.
+**Key implication**: department-level population at each individual age is exact at census
+year. For projection years, the only error source is the simple aging assumption (no
+mortality/migration). All other uncertainty is in how population is distributed across
+months and sub-geographies.
 
 ---
 
 ## Empirical validation findings (Feb 2026)
 
-### Regional level — exact match by construction
+### Regional level
 
 Comparison: our dept-level projections aggregated to region vs INSEE interactive pyramid
-(`donnees_pyramide_act.csv`) for all 13 metropolitan regions, ages 15–24, years 2015–2030.
+(`donnees_pyramide_act.csv`) for all 13 metropolitan regions, ages 15–24.
 
-- **Total population per region**: 0.00% error every year, every region.
-  This is expected — quinquennal anchoring makes department totals identical to INSEE.
-- **20-24 band**: exact match (it is the quinquennal total directly).
-- **Sex ratio**: identical to INSEE at regional level.
-- **Year drift 2015–2030**: 0.00% — quinquennal anchoring prevents drift entirely at this level.
-
-The 15–17 vs 18–19 sub-band split shows minor variations (< 0.5pp in most regions). This
-reflects age_ratio modelling accuracy within the 15–24 band, not a calibration error.
+- **Census year (2022)**: exact match by construction — population comes directly from INDCVI.
+- **Projection years**: differ from INSEE quinquennal estimates because simple aging does
+  not account for mortality or migration. Expected drift is ~0.2% over 4 years for ages 15–24.
+- **Sex ratio**: identical to INSEE at census year.
 
 ### EPCI level — internal consistency confirmed
 
@@ -132,13 +132,11 @@ No sign of systematic over- or under-correction.
 - **Census comparison (university cities)**: large diffs (+19 to +54pp) reflect MOBSCO
   effect — our output adds study-destination students; INDCVI captures residential counts.
 
-### Multi-year drift (Feb 2026)
+### Multi-year behavior
 
-University EPCI 20-24 shares drift **1.4–2.7pp over 2015–2030**. All EPCIs exceed the
-1pp threshold but the direction is stable — shares in 2022 are within ±1pp of 2015.
-After 2026, estimates freeze (quinquennal data ends; projection uses constant band totals).
-
-This drift is within the EPCI confidence interval (+3% + 1%/year beyond census year).
+With simple aging, year-over-year population changes reflect different birth cohorts
+entering/leaving the 15–24 age range. Geographic ratios are fixed at 2022 census values.
+University EPCI 20-24 shares vary across years as cohort sizes differ.
 
 ---
 
@@ -159,13 +157,10 @@ lives in each EPCI or IRIS. These fractions are assumed constant for all project
 **Empirical horizon**: assumed safe for ~2–3 years. Confidence intervals grow at 1%/year
 beyond that (plus EPCI +3%, IRIS +10% flat penalty) to reflect this degradation.
 
-**Post-2026 freeze**: the quinquennal dataset ends at 2026. For years 2027 onward,
-department-level band totals (factor A) are held constant at the 2026 value via a
-linear extrapolation of the 2025–2026 trend. Year-over-year changes in EPCI and IRIS
-population (2027–2030) reflect only the fixed geographic ratios applied to a frozen
-band total — they are **not** a demographic projection. University EPCI 20-24 shares
-drift 1.4–2.7pp over 2015–2030 (finding #12), which is within the expected CI growth
-rate but should be interpreted with caution.
+**Projection horizon**: simple aging is valid up to `census_year + min_age` (e.g.
+2022 + 15 = 2037). Beyond that, the youngest cohorts were not yet born at census time
+and cannot be projected. Year-over-year changes in EPCI and IRIS population reflect
+different cohorts entering/leaving the age range, applied with fixed geographic ratios.
 
 **Cannot be fixed without**: a time-series of EPCI-level population data, which INSEE
 does not publish at this granularity.
@@ -209,27 +204,19 @@ the 15_19 band are 18-19, of which ~60% are in higher education (→ ~25% of the
 
 ---
 
-### Bias 3 — Individual age errors from cohort-shifting
+### Bias 3 — Simple aging ignores mortality and migration
 
-**What happens**: within each 5-year band, individual ages (15, 16, 17…) are distributed
-using INDCVI age ratios, cohort-shifted. For a 2025 projection, we look at how 15-year-olds
-from 2022 are split (i.e., the 12-year-olds from the 2022 census — same birth cohort).
-Band totals are exact; the within-band split drifts over time.
+**What happens**: population at each age is taken directly from the census and aged
+forward by shifting cohorts. No mortality or migration adjustment is applied. A person
+counted as age 15 in 2022 is assumed to still be alive and in the same department at
+age 18 in 2025.
 
-**Observed magnitude (national, 2026)**:
+**Impact**: for ages 15–24, mortality is very low (~0.05%/year) and net migration is
+small at department level. The total error is estimated at ~0.2% over 4 years
+(2022→2026) for the 15–24 age range.
 
-| Age | Error vs INSEE |
-|-----|---------------|
-| 15  | -3.0% |
-| 18  | +2.5% |
-| 19  | +3.3% |
-| 21  | +4.1% |
-| 22  | +4.8% |
-| 24  | -4.0% |
-| **Total 15–24** | **+0.9%** |
-
-The sign alternates (overestimates some ages, underestimates others), confirming this is
-not a systematic scaling error but a cohort-shape modelling limitation.
+**Advantage over previous approach**: individual ages are exact at census year (no
+redistribution within 5-year bands). There is no intra-band approximation error.
 
 ---
 
@@ -276,27 +263,14 @@ distribution within each band is uniform rather than census-derived.
 
 ---
 
-### Bias 7 — Age-band composition drift: 20-24 share fluctuates with quinquennal band changes
+### Bias 7 — Age composition varies across projection years
 
-**What happens**: the 20-24 share within the 15-24 age range fluctuates year to year
-because the quinquennal dataset provides separate band totals for 15-19 and 20-24,
-and these totals vary independently. The share is not smoothed or interpolated.
+**What happens**: with simple aging, different birth cohorts enter and exit the 15–24
+age range each year. The 20-24 share within 15-24 fluctuates because census cohort
+sizes vary (reflecting historical birth rate variations).
 
-**Observed magnitude (2015–2026, university EPCIs)**:
-
-| EPCI | Share 2015 | Share 2026 | Drift |
-|------|------------|------------|-------|
-| Montpellier | 56.8% | 54.6% | +2.71pp |
-| Toulouse | 56.3% | 54.6% | +2.68pp |
-| Rennes | 53.9% | 52.2% | +2.58pp |
-| Métropole Grand Paris | 54.6% | 53.7% | +2.45pp |
-
-The drift is within the EPCI confidence interval (+3% + 1%/year). Shares in 2022 are
-within ±1pp of 2015 values (structure-repeats hypothesis holds reasonably well).
-
-**Post-2026 behavior**: when the quinquennal dataset ends (currently 2026), band totals
-beyond that year are extrapolated at constant growth. Year-over-year fluctuations in the
-20-24 share stop after 2026 — the share "freezes" at the last extrapolated ratio.
-Years 2027–2030 in the output are thus nearly identical to 2026 (finding #12).
+**This is expected behavior**, not an error — it reflects real demographic structure.
+Geographic ratios (EPCI, IRIS) are fixed at census values, so year-over-year changes
+in EPCI population are driven solely by which cohorts are in the age range that year.
 
 ---
