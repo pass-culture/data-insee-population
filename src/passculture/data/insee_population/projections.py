@@ -1,14 +1,10 @@
-"""Multi-year monthly population projections.
+"""Multi-year population projections using simple census aging.
 
-Computes ratio tables from INDCVI census data and applies them to quinquennal
-estimates to produce monthly population at department, EPCI, and IRIS levels.
+Projects population by shifting census cohorts forward in time:
+    pop(Y, A, sex, dept) = census_pop(census_year, A-(Y-census_year), sex, dept)
 
-Algorithm:
-    pop(year, month, age, sex, geo) =
-        quinquennal(year, age_band, sex, dept)
-      * age_ratio(age | age_band, sex, dept)
-      * month_ratio(month | dept)
-      * geo_ratio(geo | dept, age, sex)
+Geographic ratios, monthly birth distribution, and student mobility
+corrections are applied on top of the department-level projection.
 """
 
 from __future__ import annotations
@@ -22,7 +18,6 @@ from loguru import logger
 from passculture.data.insee_population import sql
 from passculture.data.insee_population.constants import (
     AGE_BUCKETS,
-    CAGR_RATE_CLAMP,
     CI_BASE_MID,
     CI_BASE_NEAR,
     CI_EXTRA_CANTON,
@@ -51,34 +46,6 @@ def _build_age_band_cases() -> str:
         max_age = max(age_range)
         cases.append(f"WHEN age BETWEEN {min_age} AND {max_age} THEN '{band_name}'")
     return "\n            ".join(cases)
-
-
-def compute_age_ratios(conn: duckdb.DuckDBPyConnection, census_year: int) -> None:
-    """Compute cohort-shifted age share within each 5-year band per year/dept/sex.
-
-    For each projection year Y and target age A, looks up census population at
-    census_age = A + (census_year - Y) to use the actual birth cohort.
-
-    Requires `population` (INDCVI census) and `quinquennal` (for projection years)
-    tables to exist in the connection.
-
-    Creates DuckDB tables: `age_ratios` and `age_ratios_fallback`.
-    """
-    age_band_cases = _build_age_band_cases()
-    conn.execute(
-        sql.CREATE_AGE_RATIOS.format(
-            age_band_cases=age_band_cases,
-            census_year=census_year,
-            max_age=MAX_AGE,
-        )
-    )
-    conn.execute(sql.CREATE_AGE_RATIOS_FALLBACK)
-
-    count = conn.execute("SELECT COUNT(*) FROM age_ratios").fetchone()[0]
-    depts = conn.execute(
-        "SELECT COUNT(DISTINCT department_code) FROM age_ratios"
-    ).fetchone()[0]
-    logger.debug("  Age ratios: {:,} rows across {} departments", count, depts)
 
 
 _GEO_RATIO_CONFIG = {
@@ -139,19 +106,20 @@ def compute_geo_ratios(conn: duckdb.DuckDBPyConnection, level: str) -> None:
     )
 
 
-TREND_YEARS = 5
-"""Number of years used to compute CAGR for post-pipeline extension."""
-
-
 def project_multi_year(
     conn: duckdb.DuckDBPyConnection,
     min_age: int,
     max_age: int,
+    start_year: int = 2022,
     end_year: int | None = None,
     census_year: int = 2022,
     monthly: bool = False,
 ) -> None:
     """Project multi-year population at all geographic levels.
+
+    Uses simple census aging: population at age A in year Y equals the
+    census population at age A-(Y-census_year), with no mortality or
+    migration adjustment.
 
     Default mode (yearly): one snapshot at January 1st per year, exploded
     into 12 birth-month sub-rows per cohort.
@@ -159,20 +127,18 @@ def project_multi_year(
     year/dept/age/sex.
 
     Requires these tables to already exist in the connection:
-    - `quinquennal`: from download_quinquennal_estimates
+    - `population`: from download_and_process (INDCVI census)
     - `monthly_births`: from download_monthly_birth_distribution
-    - `age_ratios`, `age_ratios_fallback`: from compute_age_ratios
     - `geo_ratios_epci`: from compute_geo_ratios('epci')
     - `geo_ratios_canton`: from compute_geo_ratios('canton')
     - `geo_ratios_iris`: from compute_geo_ratios('iris')
 
-    When end_year exceeds the quinquennal data range, the department table
-    is first built from real data then extended using CAGR computed on
-    the final projected output (not raw quinquennal input).
-
     Creates: `population_department`, `population_epci`, `population_canton`,
              `population_iris`
     """
+    if end_year is None:
+        end_year = census_year
+
     mode_label = "monthly" if monthly else "yearly"
     logger.info("Projecting multi-year population ({})...", mode_label)
 
@@ -185,19 +151,13 @@ def project_multi_year(
     }
 
     # Monthly vs yearly mode controls how snapshot months are generated.
-    # Population is a stock variable (not a flow), so the full annual
-    # population is replicated across all 12 snapshot months — month_ratio
-    # is only applied once at export time for birth-month sub-cohorts.
     if monthly:
         month_params = {
             "month_select": "mb.month",
             "month_factor": "",
             "month_join": (
                 "JOIN monthly_births mb\n"
-                "        ON q.department_code = mb.department_code"
-            ),
-            "month_cross_join": (
-                "CROSS JOIN (SELECT DISTINCT month FROM monthly_births) mb"
+                "        ON c.department_code = mb.department_code"
             ),
         }
     else:
@@ -205,7 +165,6 @@ def project_multi_year(
             "month_select": "1",
             "month_factor": "",
             "month_join": "",
-            "month_cross_join": "",
         }
 
     def _timed(label, fn):
@@ -217,38 +176,20 @@ def project_multi_year(
         logger.debug("{} done ({:.1f}s)", label, elapsed)
         return result
 
-    # Department level (from real pipeline data)
+    # Department level (simple census aging)
     _timed(
         "Department projection",
         lambda: conn.execute(
             sql.CREATE_PROJECTED_DEPARTMENT.format(
-                min_age=min_age, max_age=max_age, **ci_params, **month_params
+                min_age=min_age,
+                max_age=max_age,
+                start_year=start_year,
+                end_year=end_year,
+                **ci_params,
+                **month_params,
             )
         ),
     )
-
-    # Extend with CAGR if requested end_year exceeds projected data
-    max_data_year = conn.execute(
-        "SELECT MAX(year) FROM population_department"
-    ).fetchone()[0]
-
-    if end_year and end_year > max_data_year:
-        first_trend_year = max(
-            max_data_year - TREND_YEARS,
-            conn.execute("SELECT MIN(year) FROM population_department").fetchone()[0],
-        )
-        _timed(
-            f"CAGR extension {max_data_year}→{end_year}",
-            lambda: conn.execute(
-                sql.EXTEND_DEPARTMENT_WITH_CAGR.format(
-                    max_data_year=max_data_year,
-                    first_trend_year=first_trend_year,
-                    end_year=end_year,
-                    cagr_rate_clamp=CAGR_RATE_CLAMP,
-                    **ci_params,
-                )
-            ),
-        )
 
     dept_rows = conn.execute("SELECT COUNT(*) FROM population_department").fetchone()[0]
     logger.debug("  Department (compact): {:,} rows", dept_rows)
@@ -301,7 +242,7 @@ def project_multi_year(
     n_months = conn.execute(
         "SELECT COUNT(DISTINCT month) FROM population_department"
     ).fetchone()[0]
-    avg_pop = dept_pop / (n_years * n_months) if n_years and n_months else 0
+    avg_pop = float(dept_pop) / (n_years * n_months) if n_years and n_months else 0
     logger.debug(
         "  Department: {:,} rows (x12 at export), "
         "{} years, {} depts, "
@@ -324,7 +265,7 @@ def project_multi_year(
         FROM population_canton
     """).fetchone()
     canton_count, canton_pop, n_cantons = canton_stats
-    canton_pct = round(100 * canton_pop / dept_pop, 1) if dept_pop else 0
+    canton_pct = round(100 * float(canton_pop) / float(dept_pop), 1) if dept_pop else 0
     logger.debug(
         "  Canton: {:,} rows, {} cantons ({}% coverage)",
         canton_count,
@@ -337,7 +278,7 @@ def project_multi_year(
         FROM population_iris
     """).fetchone()
     iris_count, iris_pop, n_irises = iris_stats
-    iris_pct = round(100 * iris_pop / dept_pop, 1) if dept_pop else 0
+    iris_pct = round(100 * float(iris_pop) / float(dept_pop), 1) if dept_pop else 0
     logger.debug(
         "  IRIS: {:,} rows, {} IRIS ({}% coverage)",
         iris_count,
@@ -347,10 +288,10 @@ def project_multi_year(
 
 
 def _build_band_config_sql() -> str:
-    """Build the SQL VALUES block mapping age_band → AGEREV10, cap, default.
+    """Build the SQL VALUES block mapping age_band -> AGEREV10, cap, default.
 
     Includes secondary_agerev10 and secondary_weight for bands with a mixed
-    population (e.g. 15_19 uses 75% lycée + 25% higher-ed flows).
+    population (e.g. 15_19 uses 75% lycee + 25% higher-ed flows).
 
     Returns a UNION ALL of SELECT rows for use in a band_config CTE.
     """
@@ -377,7 +318,7 @@ def compute_department_mobility_rates(
 
     For each (department, age_band) pair, computes the fraction of students in
     that band who study in a different department, using the MOBSCO AGEREV10
-    group appropriate for that band (AGEREV10='15' for lycée-age 15_19,
+    group appropriate for that band (AGEREV10='15' for lycee-age 15_19,
     AGEREV10='18' for higher-ed 20_24). Creates a `mobility_weights` table with
     `blend_weight = min(mobility_rate, per-band cap)`, falling back to a
     per-band default for departments not in MOBSCO.

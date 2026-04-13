@@ -2,9 +2,9 @@
 
 Handles HTTP downloads and Excel parsing for:
 - Census INDCVI parquet files
-- Population estimates by department/year
-- Quinquennal age pyramid by department/sex/age band
-- Birth data by department/month
+- Monthly birth distribution by department
+- MOBSCO student commuting parquet
+- Mayotte synthesis (population estimates + quinquennal age pyramid)
 """
 
 from __future__ import annotations
@@ -155,34 +155,6 @@ def download_estimates(
         return pd.DataFrame()
 
 
-def download_birth_data() -> pd.DataFrame:
-    """Download INSEE birth data by department/year.
-
-    Returns:
-        DataFrame with columns: birth_year, department_code, births
-    """
-    url = BIRTH_DATA_URLS.get("by_month_dept")
-    if not url:
-        return pd.DataFrame()
-
-    try:
-        logger.info("Downloading birth data from {}", url)
-        response = requests.get(url, timeout=ESTIMATES_TIMEOUT)
-        response.raise_for_status()
-
-        xls = pd.ExcelFile(io.BytesIO(response.content))
-        sheet_name = next(
-            (name for name in xls.sheet_names if "dep" in name.lower()),
-            xls.sheet_names[0],
-        )
-        df = pd.read_excel(xls, sheet_name=sheet_name, skiprows=3)
-        return _parse_birth_data(df)
-
-    except Exception as e:
-        logger.warning("Could not download birth data: {}", e)
-        return pd.DataFrame()
-
-
 def download_quinquennal_estimates(
     start_year: int,
     end_year: int,
@@ -190,8 +162,9 @@ def download_quinquennal_estimates(
 ) -> pd.DataFrame:
     """Download population by department/sex/5-year age band for multiple years.
 
-    Parses the AGE_PYRAMID_URL Excel file (one sheet per year).
-    For years beyond available data, extrapolates using CAGR.
+    Used for Mayotte synthesis. Parses the AGE_PYRAMID_URL Excel file
+    (one sheet per year). For years beyond available data, repeats the
+    last available year.
 
     Args:
         start_year: First year to include
@@ -351,43 +324,6 @@ def _parse_estimates_sheet(xls: pd.ExcelFile, sheet_name: str, year: int) -> lis
             continue
 
     return results
-
-
-def _parse_birth_data(df: pd.DataFrame) -> pd.DataFrame:
-    """Parse birth data Excel into standardized format."""
-    df.columns = df.columns.astype(str).str.strip()
-    dept_col = df.columns[0]
-    year_cols = [c for c in df.columns if c.isdigit() and len(c) == 4]
-
-    results = []
-    for _, row in df.iterrows():
-        dept = str(row[dept_col]).strip() if pd.notna(row[dept_col]) else ""
-        if (
-            not dept
-            or len(dept) > 3
-            or dept.lower() in ["total", "france", "métropole"]
-        ):
-            continue
-        if len(dept) == 1:
-            dept = f"0{dept}"
-
-        for col in year_cols:
-            try:
-                births = row[col]
-                if pd.notna(births):
-                    results.append(
-                        {
-                            "birth_year": int(col),
-                            "department_code": dept,
-                            "births": float(
-                                str(births).replace(" ", "").replace(",", ".")
-                            ),
-                        }
-                    )
-            except (ValueError, TypeError):
-                continue
-
-    return pd.DataFrame(results)
 
 
 def _extrapolate_last_year(

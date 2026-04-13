@@ -1,62 +1,54 @@
-"""Multi-year projected population tables (department, EPCI, IRIS)."""
+"""Multi-year projected population tables (department, EPCI, IRIS).
+
+Uses simple aging from census: population at age A in year Y equals
+census population at age A-(Y-census_year). No mortality or migration
+adjustment — the census is aged forward by shifting cohorts.
+"""
 
 __all__ = [
     "CREATE_PROJECTED_CANTON",
     "CREATE_PROJECTED_DEPARTMENT",
     "CREATE_PROJECTED_EPCI",
     "CREATE_PROJECTED_IRIS",
-    "EXTEND_DEPARTMENT_WITH_CAGR",
 ]
 
-# Project department-level population: quinquennal * age_ratio (* month_ratio)
+# Project department-level population by simple cohort aging.
+# For projection year Y, a person of age A was age A-(Y-census_year) at census.
+# We aggregate census population across geographic sub-levels to get department
+# totals, then cross-join with projection years to shift ages forward.
 # Includes confidence intervals based on census offset.
 # Placeholders {month_select}, {month_factor}, {month_join}, {month_cross_join}
 # control monthly vs yearly mode.
 CREATE_PROJECTED_DEPARTMENT = """
 CREATE OR REPLACE TABLE population_department AS
-WITH base AS (
+WITH census_dept AS (
     SELECT
-        q.year,
-        {month_select} AS month,
-        q.department_code,
-        (SELECT DISTINCT region_code FROM population p
-         WHERE p.department_code = q.department_code LIMIT 1) AS region_code,
-        ar.age,
-        q.sex,
-        q.population * ar.age_ratio{month_factor} AS population
-    FROM quinquennal q
-    JOIN age_ratios ar
-        ON q.year = ar.year
-        AND q.department_code = ar.department_code
-        AND q.sex = ar.sex
-        AND q.age_band = ar.age_band
-    {month_join}
-    WHERE ar.age BETWEEN {min_age} AND {max_age}
+        department_code,
+        (SELECT DISTINCT region_code FROM population p2
+         WHERE p2.department_code = p.department_code LIMIT 1) AS region_code,
+        age,
+        sex,
+        SUM(population) AS population
+    FROM population p
+    GROUP BY department_code, age, sex
 ),
-base_with_fallback AS (
-    SELECT * FROM base
-    UNION ALL
+projection_years AS (
+    SELECT generate_series AS year
+    FROM generate_series({start_year}, {end_year})
+),
+projected AS (
     SELECT
-        q.year,
+        py.year,
         {month_select} AS month,
-        q.department_code,
-        NULL AS region_code,
-        ar.age,
-        q.sex,
-        q.population * ar.age_ratio{month_factor} AS population
-    FROM quinquennal q
-    JOIN age_ratios_fallback ar
-        ON q.year = ar.year
-        AND q.sex = ar.sex
-        AND q.age_band = ar.age_band
-    {month_cross_join}
-    WHERE ar.age BETWEEN {min_age} AND {max_age}
-      AND q.department_code NOT IN (SELECT DISTINCT department_code FROM age_ratios)
-      AND q.department_code IN (
-          SELECT DISTINCT department_code FROM monthly_births
-          UNION
-          SELECT q2.department_code FROM quinquennal q2
-      )
+        c.department_code,
+        c.region_code,
+        (c.age + (py.year - {census_year})) AS age,
+        c.sex,
+        CAST(c.population AS DOUBLE){month_factor} AS population
+    FROM census_dept c
+    CROSS JOIN projection_years py
+    {month_join}
+    WHERE (c.age + (py.year - {census_year})) BETWEEN {min_age} AND {max_age}
 )
 SELECT
     year,
@@ -86,7 +78,7 @@ SELECT
         WHEN ABS(year - {census_year}) <= 3 THEN {ci_base_mid}
         ELSE {ci_per_year} * ABS(year - {census_year})
     END) AS population_high
-FROM base_with_fallback
+FROM projected
 WHERE population > 0
 """
 
@@ -152,83 +144,3 @@ CREATE_PROJECTED_IRIS = _PROJECTED_GEO_TEMPLATE.format(
     gr.commune_code,
     gr.iris_code,""",
 )
-
-# Extend population_department beyond max_data_year using CAGR computed
-# from the last TREND_YEARS of the *projected* output.
-# This ensures the growth rate reflects the full pipeline (quinquennal *
-# age_ratio * month_ratio), not just the raw quinquennal input.
-# Confidence interval grows with census offset for extended years.
-EXTEND_DEPARTMENT_WITH_CAGR = """
-CREATE OR REPLACE TABLE population_department AS
-WITH kept AS (
-    SELECT * FROM population_department
-    WHERE year <= {max_data_year}
-),
-boundary AS (
-    SELECT
-        department_code, month, region_code, age, sex, geo_precision,
-        MAX(CASE WHEN year = {max_data_year} THEN population END)
-            AS last_pop,
-        MAX(CASE WHEN year = {first_trend_year} THEN population END)
-            AS first_pop
-    FROM population_department
-    WHERE year IN ({max_data_year}, {first_trend_year})
-    GROUP BY department_code, month, region_code, age, sex, geo_precision
-),
-cagr AS (
-    SELECT *,
-        CASE
-            WHEN first_pop > 0 AND last_pop > 0 THEN
-                GREATEST(-{cagr_rate_clamp}, LEAST({cagr_rate_clamp},
-                    POWER(last_pop / first_pop,
-                          1.0 / ({max_data_year} - {first_trend_year})) - 1
-                ))
-            ELSE 0
-        END AS rate
-    FROM boundary
-    WHERE last_pop > 0
-),
-future_years AS (
-    SELECT generate_series AS year
-    FROM generate_series({max_data_year} + 1, {end_year})
-),
-extended AS (
-    SELECT
-        fy.year,
-        c.month,
-        MAKE_DATE(fy.year, c.month, 1) AS snapshot_month,
-        MAKE_DATE(fy.year - c.age, 1, 1) AS born_date,
-        DATEDIFF('month', MAKE_DATE(fy.year - c.age, 1, 1),
-                MAKE_DATE(fy.year, c.month, 1)) / 12.0
-            AS decimal_age,
-        c.department_code,
-        c.region_code,
-        c.age,
-        c.sex,
-        c.geo_precision,
-        c.last_pop
-            * POWER(1 + c.rate, fy.year - {max_data_year}) AS population,
-        CASE
-            WHEN ABS(fy.year - {census_year}) <= 1 THEN {ci_base_near}
-            WHEN ABS(fy.year - {census_year}) <= 3 THEN {ci_base_mid}
-            ELSE {ci_per_year} * ABS(fy.year - {census_year})
-        END AS confidence_pct,
-        c.last_pop * POWER(1 + c.rate, fy.year - {max_data_year})
-            * (1.0 - CASE
-                WHEN ABS(fy.year - {census_year}) <= 1 THEN {ci_base_near}
-                WHEN ABS(fy.year - {census_year}) <= 3 THEN {ci_base_mid}
-                ELSE {ci_per_year} * ABS(fy.year - {census_year})
-            END) AS population_low,
-        c.last_pop * POWER(1 + c.rate, fy.year - {max_data_year})
-            * (1.0 + CASE
-                WHEN ABS(fy.year - {census_year}) <= 1 THEN {ci_base_near}
-                WHEN ABS(fy.year - {census_year}) <= 3 THEN {ci_base_mid}
-                ELSE {ci_per_year} * ABS(fy.year - {census_year})
-            END) AS population_high
-    FROM cagr c
-    CROSS JOIN future_years fy
-)
-SELECT * FROM kept
-UNION ALL
-SELECT * FROM extended
-"""

@@ -1,92 +1,10 @@
-"""Age and geographic ratio computation templates."""
+"""Geographic ratio computation templates."""
 
 __all__ = [
-    "CREATE_AGE_RATIOS",
-    "CREATE_AGE_RATIOS_FALLBACK",
     "CREATE_GEO_RATIOS_CANTON",
     "CREATE_GEO_RATIOS_EPCI",
     "CREATE_GEO_RATIOS_IRIS",
 ]
-
-# Compute cohort-shifted age share within each 5-year band, per year/dept/sex.
-# For projection year Y and target age A, looks up census population at
-# census_age = A + (census_year - Y), so the actual birth cohort is used.
-# Uses the INDCVI-based `population` table as reference distribution.
-# Requires `quinquennal` table for projection years.
-CREATE_AGE_RATIOS = """
-CREATE OR REPLACE TABLE age_ratios AS
-WITH age_band_map AS (
-    SELECT
-        age,
-        CASE
-            {age_band_cases}
-        END AS age_band
-    FROM generate_series(0, {max_age}) AS t(age)
-),
-projection_years AS (
-    SELECT DISTINCT year FROM quinquennal
-),
-target_ages AS (
-    SELECT
-        py.year,
-        abm.age AS target_age,
-        abm.age_band,
-        GREATEST(0, LEAST({max_age}, abm.age + ({census_year} - py.year))) AS census_age
-    FROM projection_years py
-    CROSS JOIN age_band_map abm
-    WHERE abm.age_band IS NOT NULL
-),
-census_lookup AS (
-    SELECT
-        ta.year,
-        ta.target_age,
-        ta.age_band,
-        ta.census_age,
-        p.department_code,
-        p.sex,
-        SUM(p.population) AS census_pop
-    FROM target_ages ta
-    JOIN population p ON p.age = ta.census_age
-    GROUP BY ta.year, ta.target_age, ta.age_band, ta.census_age,
-             p.department_code, p.sex
-),
-band_totals AS (
-    SELECT year, age_band, department_code, sex,
-           SUM(census_pop) AS band_total
-    FROM census_lookup
-    GROUP BY year, age_band, department_code, sex
-)
-SELECT
-    cl.year,
-    cl.department_code,
-    cl.sex,
-    cl.age_band,
-    cl.target_age AS age,
-    CASE WHEN bt.band_total > 0
-         THEN cl.census_pop / bt.band_total
-         ELSE 1.0 / COUNT(*) OVER (
-             PARTITION BY cl.year, cl.department_code, cl.sex, cl.age_band)
-    END AS age_ratio
-FROM census_lookup cl
-JOIN band_totals bt
-    ON cl.year = bt.year
-    AND cl.department_code = bt.department_code
-    AND cl.sex = bt.sex
-    AND cl.age_band = bt.age_band
-"""
-
-# Compute fallback age ratios (national average) for departments not in INDCVI
-CREATE_AGE_RATIOS_FALLBACK = """
-CREATE OR REPLACE TABLE age_ratios_fallback AS
-SELECT
-    year,
-    sex,
-    age_band,
-    age,
-    AVG(age_ratio) AS age_ratio
-FROM age_ratios
-GROUP BY year, sex, age_band, age
-"""
 
 # Compute EPCI share within each dept/age_band/sex from INDCVI population
 CREATE_GEO_RATIOS_EPCI = """
