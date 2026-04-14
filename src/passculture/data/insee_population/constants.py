@@ -26,30 +26,18 @@ INDCVI_URLS = {
     },
 }
 
-# Population estimates URL (for projections beyond census year)
-# These are department-level estimates updated annually
-# Page 8721456 has 1975-2026 estimates (updated Jan 2026)
+# Population estimates URL (used for Mayotte synthesis)
+# Department-level estimates, page 8721456, 1975-2026 (updated Jan 2026)
 POPULATION_ESTIMATES_URL = "https://www.insee.fr/fr/statistiques/fichier/8721456/estim-pop-dep-sexe-gca-1975-2026.xlsx"
 
-# Birth data URLs for cohort-based projections
-# More accurate for specific age groups (15-20) since we track actual birth cohorts
+# Birth data URLs for monthly distribution
 BIRTH_DATA_URLS = {
-    # Births by department and year (for cohort tracking)
-    "by_dept_year": "https://www.insee.fr/fr/statistiques/fichier/2381380/T_nais_dep.xlsx",
-    # Births by department and month (for monthly distribution)
     # N4D: naissances vivantes par mois et département (page 8582142)
     # Columns: REGDEP_DOMI_MERE (region+dept), MNAIS (01-12/AN), NBNAIS
     "by_dept_month": "https://www.insee.fr/fr/statistiques/fichier/8582142/N4D.csv",
-    # Monthly births by department of residence (2 years per file)
+    # Monthly births by department of residence (fallback)
     # Source: https://www.insee.fr/fr/statistiques/6041515?sommaire=5348638
     "by_month_dept": "https://www.insee.fr/fr/statistiques/fichier/6041515/naissances_dep_decembre_2021.xlsx",
-}
-
-# Official reference populations ("populations légales") for validation
-# These are the official census figures by commune/department
-REFERENCE_POPULATION_URLS = {
-    2022: "https://www.insee.fr/fr/statistiques/fichier/8290591/ensemble.xlsx",
-    2021: "https://www.insee.fr/fr/statistiques/fichier/7739582/ensemble.xlsx",
 }
 
 # MOBSCO (Mobilités Scolaires) — student commuting flows
@@ -100,13 +88,7 @@ STUDENT_MOBILITY_BLEND_DEFAULT_BY_BAND: dict[str, float] = {
     "20_24": 0.30,
 }
 
-# Kept for reference / backward compatibility
-STUDENT_MOBILITY_BLEND_DEFAULT = 0.3
-STUDENT_MOBILITY_BLEND_CAP = 0.6
-
-# Population estimates by age quinquennial (5-year bands) by department
-# Better for validating specific age ranges like 15-20
-# Contains columns for each 5-year age group: 0-4, 5-9, 10-14, 15-19, 20-24, etc.
+# Quinquennal age pyramid URL (used for Mayotte synthesis)
 AGE_PYRAMID_URL = "https://www.insee.fr/fr/statistiques/fichier/8721456/estim-pop-dep-sexe-aq-1975-2026.xlsx"
 
 # Columns to extract from INDCVI files
@@ -118,14 +100,6 @@ INDCVI_COLUMNS = [
     "SEXE",  # Sex (1=M, 2=F)
     "IPONDI",  # Individual weight (15 decimal precision)
 ]
-
-# IRIS geographic correspondence table URLs
-IRIS_GEO_BASE_URL = "https://www.insee.fr/fr/statistiques/fichier/7708995"
-IRIS_GEO_URL_PATTERN = f"{IRIS_GEO_BASE_URL}/reference_IRIS_geo{{year}}.zip"
-
-# Population reference (official figures) URLs
-POPULATION_REF_BASE_URL = "https://www.insee.fr/fr/statistiques/fichier"
-POPULATION_REF_URL_PATTERN = f"{POPULATION_REF_BASE_URL}/8680726/ensemble.csv"
 
 # Department codes
 DEPARTMENTS_METRO = [f"{i:02d}" for i in range(1, 96) if i != 20] + ["2A", "2B"]
@@ -173,11 +147,6 @@ CI_EXTRA_CANTON = 0.05  # additional uncertainty for canton geo_ratio
 CI_EXTRA_EPCI = 0.03  # additional uncertainty for EPCI geo_ratio
 CI_EXTRA_IRIS = 0.10  # additional uncertainty for IRIS geo_ratio
 
-# Maximum years of CAGR extrapolation beyond the pipeline's valid range.
-# The pipeline produces reliable projections up to census_year + min_age
-# (the point where cohort-shifted age ratios remain valid). Beyond that,
-# CAGR computed on final projected output extends the series.
-MAX_CAGR_EXTENSION = 10
 
 # Age bands affected by student mobility correction (MOBSCO).
 # Order must match STUDENT_BAND_AGEREV10 keys.
@@ -190,8 +159,6 @@ IRIS_SENTINEL_MASKED_SUFFIX = "XXXX"  # IRIS masked (< 200 inhabitants)
 # Maximum individual age in census data (AGEREV 0-120)
 MAX_AGE = 120
 
-# CAGR rate clamp: cap annual growth rate to +/-5% to avoid extrapolation blow-up
-CAGR_RATE_CLAMP = 0.05
 
 # BigQuery schema for population tables (per geographic level)
 # Common columns shared by all levels

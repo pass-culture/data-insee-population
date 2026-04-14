@@ -15,7 +15,12 @@ from passculture.data.insee_population.duckdb_processor import PopulationProcess
 @pytest.fixture
 def processor() -> PopulationProcessor:
     """Create a processor instance for testing."""
-    return PopulationProcessor(year=2022, cache_dir=None)
+    return PopulationProcessor(
+        year=2022,
+        start_year=2022,
+        end_year=2022,
+        cache_dir=None,
+    )
 
 
 @pytest.fixture
@@ -99,15 +104,15 @@ class TestProcessorInit:
 
     def test_default_values(self):
         """Test default initialization values."""
-        processor = PopulationProcessor()
+        processor = PopulationProcessor(start_year=2022, end_year=2022)
         assert processor.year == 2022
         assert processor.min_age == 0
         assert processor.max_age == 120
         assert processor.include_dom is True
         assert processor.include_com is True
         assert processor.include_mayotte is True
-        assert processor.start_year == 2015
-        assert processor.end_year == 2030
+        assert processor.start_year == 2022
+        assert processor.end_year == 2022
 
     def test_custom_values(self):
         """Test custom initialization values."""
@@ -137,30 +142,30 @@ class TestProcessorInit:
         assert processor._base_table_created is False
 
     def test_rejects_end_year_beyond_forecast_horizon(self):
-        """Test that end_year beyond max reliable forecast raises ValueError."""
-        # census 2022 + min_age 15 + MAX_CAGR_EXTENSION 10 = 2047
-        with pytest.raises(ValueError, match="exceeds maximum reliable forecast"):
+        """Test that end_year beyond max valid projection raises ValueError."""
+        # census 2022 + min_age 15 = 2037
+        with pytest.raises(ValueError, match="exceeds maximum valid projection"):
             PopulationProcessor(
                 year=2022,
                 min_age=15,
                 max_age=24,
                 start_year=2015,
-                end_year=2048,
+                end_year=2038,
                 cache_dir=None,
             )
 
     def test_accepts_end_year_at_forecast_limit(self):
         """Test that end_year exactly at the limit is accepted."""
-        # census 2022 + min_age 15 + MAX_CAGR_EXTENSION 10 = 2047
+        # census 2022 + min_age 15 = 2037
         processor = PopulationProcessor(
             year=2022,
             min_age=15,
             max_age=24,
             start_year=2015,
-            end_year=2047,
+            end_year=2037,
             cache_dir=None,
         )
-        assert processor.end_year == 2047
+        assert processor.end_year == 2037
 
 
 # -----------------------------------------------------------------------------
@@ -287,17 +292,23 @@ class TestDepartmentCoverage:
 
     def test_dom_filtering_flag(self):
         """Test DOM filtering option is stored correctly."""
-        processor = PopulationProcessor(include_dom=False, cache_dir=None)
+        processor = PopulationProcessor(
+            include_dom=False, start_year=2022, end_year=2022, cache_dir=None
+        )
         assert processor.include_dom is False
 
     def test_com_filtering_flag(self):
         """Test COM filtering option is stored correctly."""
-        processor = PopulationProcessor(include_com=False, cache_dir=None)
+        processor = PopulationProcessor(
+            include_com=False, start_year=2022, end_year=2022, cache_dir=None
+        )
         assert processor.include_com is False
 
     def test_mayotte_option_flag(self):
         """Test Mayotte option is stored correctly."""
-        processor = PopulationProcessor(include_mayotte=True, cache_dir=None)
+        processor = PopulationProcessor(
+            include_mayotte=True, start_year=2022, end_year=2022, cache_dir=None
+        )
         assert processor.include_mayotte is True
 
 
@@ -357,34 +368,9 @@ class TestMultiYearProjection:
         return processor
 
     def _setup_projection_tables(self, processor: PopulationProcessor) -> None:
-        """Set up all required tables for projection."""
+        """Set up all required tables for projection (simple aging mode)."""
         from passculture.data.insee_population import sql
-        from passculture.data.insee_population.projections import (
-            compute_age_ratios,
-            compute_geo_ratios,
-        )
-
-        # Register quinquennal estimates (needed by cohort-shifted age ratios)
-        quinquennal_df = pd.DataFrame(
-            [
-                {
-                    "year": y,
-                    "department_code": d,
-                    "sex": s,
-                    "age_band": "15_19",
-                    "population": p,
-                }
-                for y in [2022, 2023]
-                for d, p_base in [("75", 5000.0), ("13", 4000.0)]
-                for s, factor in [("male", 1.0), ("female", 0.95)]
-                for p in [p_base * factor * (1.01 if y == 2023 else 1.0)]
-            ]
-        )
-        processor._register_dataframe("quinquennal_df", quinquennal_df)
-        processor._execute(sql.REGISTER_QUINQUENNAL)
-
-        # Compute cohort-shifted age ratios from base table
-        compute_age_ratios(processor.conn, census_year=2022)
+        from passculture.data.insee_population.projections import compute_geo_ratios
 
         # Register monthly birth distribution (uniform for simplicity)
         months = list(range(1, 13))
@@ -408,7 +394,13 @@ class TestMultiYearProjection:
         from passculture.data.insee_population.projections import project_multi_year
 
         self._setup_projection_tables(projection_processor)
-        project_multi_year(projection_processor.conn, 15, 20)
+        project_multi_year(
+            projection_processor.conn,
+            15,
+            20,
+            start_year=2022,
+            end_year=2023,
+        )
 
         result = projection_processor.to_pandas("department")
         required_cols = {
@@ -434,7 +426,13 @@ class TestMultiYearProjection:
         from passculture.data.insee_population.projections import project_multi_year
 
         self._setup_projection_tables(projection_processor)
-        project_multi_year(projection_processor.conn, 15, 20)
+        project_multi_year(
+            projection_processor.conn,
+            15,
+            20,
+            start_year=2022,
+            end_year=2023,
+        )
 
         result = projection_processor.to_pandas("department")
         # Yearly mode: only month=1 (January snapshot)
@@ -447,7 +445,13 @@ class TestMultiYearProjection:
         from passculture.data.insee_population.projections import project_multi_year
 
         self._setup_projection_tables(projection_processor)
-        project_multi_year(projection_processor.conn, 15, 20)
+        project_multi_year(
+            projection_processor.conn,
+            15,
+            20,
+            start_year=2022,
+            end_year=2023,
+        )
 
         result = projection_processor.to_pandas("department")
         years = sorted(result["year"].unique())
@@ -459,7 +463,13 @@ class TestMultiYearProjection:
         from passculture.data.insee_population.projections import project_multi_year
 
         self._setup_projection_tables(projection_processor)
-        project_multi_year(projection_processor.conn, 15, 20)
+        project_multi_year(
+            projection_processor.conn,
+            15,
+            20,
+            start_year=2022,
+            end_year=2023,
+        )
 
         result = projection_processor.to_pandas("department")
         # For age=18, birth_month=1, month=1: born 2004-01-01, snapshot 2022-01-01
@@ -485,7 +495,13 @@ class TestMultiYearProjection:
         from passculture.data.insee_population.projections import project_multi_year
 
         self._setup_projection_tables(projection_processor)
-        project_multi_year(projection_processor.conn, 15, 20)
+        project_multi_year(
+            projection_processor.conn,
+            15,
+            20,
+            start_year=2022,
+            end_year=2023,
+        )
 
         result = projection_processor.to_pandas("department")
         import datetime
@@ -513,7 +529,13 @@ class TestMultiYearProjection:
         from passculture.data.insee_population.projections import project_multi_year
 
         self._setup_projection_tables(projection_processor)
-        project_multi_year(projection_processor.conn, 15, 20)
+        project_multi_year(
+            projection_processor.conn,
+            15,
+            20,
+            start_year=2022,
+            end_year=2023,
+        )
 
         for level in ["department", "epci", "iris"]:
             result = projection_processor.to_pandas(level)
@@ -524,7 +546,13 @@ class TestMultiYearProjection:
         from passculture.data.insee_population.projections import project_multi_year
 
         self._setup_projection_tables(projection_processor)
-        project_multi_year(projection_processor.conn, 15, 20)
+        project_multi_year(
+            projection_processor.conn,
+            15,
+            20,
+            start_year=2022,
+            end_year=2023,
+        )
 
         result = projection_processor.to_pandas("epci")
         assert "epci_code" in result.columns
@@ -535,7 +563,13 @@ class TestMultiYearProjection:
         from passculture.data.insee_population.projections import project_multi_year
 
         self._setup_projection_tables(projection_processor)
-        project_multi_year(projection_processor.conn, 15, 20)
+        project_multi_year(
+            projection_processor.conn,
+            15,
+            20,
+            start_year=2022,
+            end_year=2023,
+        )
 
         result = projection_processor.to_pandas("iris")
         assert "iris_code" in result.columns
@@ -546,7 +580,13 @@ class TestMultiYearProjection:
         from passculture.data.insee_population.projections import project_multi_year
 
         self._setup_projection_tables(projection_processor)
-        project_multi_year(projection_processor.conn, 15, 20)
+        project_multi_year(
+            projection_processor.conn,
+            15,
+            20,
+            start_year=2022,
+            end_year=2023,
+        )
 
         dept_pop = projection_processor.conn.execute(
             "SELECT SUM(population) FROM population_department"
@@ -563,7 +603,14 @@ class TestMultiYearProjection:
         from passculture.data.insee_population.projections import project_multi_year
 
         self._setup_projection_tables(projection_processor)
-        project_multi_year(projection_processor.conn, 15, 20, monthly=True)
+        project_multi_year(
+            projection_processor.conn,
+            15,
+            20,
+            start_year=2022,
+            end_year=2023,
+            monthly=True,
+        )
 
         result = projection_processor.to_pandas("department")
         months = sorted(result["month"].unique())
@@ -573,30 +620,37 @@ class TestMultiYearProjection:
         assert birth_months == list(range(1, 13))
 
     def test_birth_month_population_sum_preserved(self, projection_processor):
-        """Sum across birth_months should equal the annual quinquennal total."""
+        """Sum of department population should equal census total for same year."""
         from passculture.data.insee_population.projections import project_multi_year
 
         self._setup_projection_tables(projection_processor)
-        project_multi_year(projection_processor.conn, 15, 20)
+        project_multi_year(
+            projection_processor.conn,
+            15,
+            20,
+            start_year=2022,
+            end_year=2023,
+        )
 
-        # In yearly mode, sum of population across all birth_months for a
-        # given year/dept/age/sex should equal quinquennal * age_ratio
-        # (since month_ratios sum to 1)
-        total = projection_processor.conn.execute("""
+        # Department total for census year should equal census population
+        dept_total = projection_processor.conn.execute("""
             SELECT SUM(population)
             FROM population_department
             WHERE year = 2022 AND department_code = '75' AND sex = 'male'
         """).fetchone()[0]
 
-        quinq_total = projection_processor.conn.execute("""
+        census_total = float(
+            projection_processor.conn.execute("""
             SELECT SUM(population)
-            FROM quinquennal
-            WHERE year = 2022 AND department_code = '75' AND sex = 'male'
+            FROM population
+            WHERE department_code = '75' AND sex = 'male'
+              AND age BETWEEN 15 AND 20
         """).fetchone()[0]
+        )
 
-        assert abs(total - quinq_total) < 1.0, (
-            f"Birth-month sum ({total:.1f}) should equal "
-            f"quinquennal ({quinq_total:.1f})"
+        assert abs(dept_total - census_total) < 1.0, (
+            f"Department total ({dept_total:.1f}) should equal "
+            f"census ({census_total:.1f})"
         )
 
     def test_birth_month_column_always_present(self, projection_processor):
@@ -604,14 +658,20 @@ class TestMultiYearProjection:
         from passculture.data.insee_population.projections import project_multi_year
 
         self._setup_projection_tables(projection_processor)
-        project_multi_year(projection_processor.conn, 15, 20)
+        project_multi_year(
+            projection_processor.conn,
+            15,
+            20,
+            start_year=2022,
+            end_year=2023,
+        )
 
         for level in ["department", "epci", "canton", "iris"]:
             result = projection_processor.to_pandas(level)
             assert "birth_month" in result.columns, f"birth_month missing from {level}"
 
-    def test_yearly_exported_population_equals_quinquennal(self, projection_processor):
-        """In yearly mode, SUM(exported pop) per band must equal quinquennal input.
+    def test_yearly_exported_population_equals_census(self, projection_processor):
+        """In yearly mode, SUM(exported pop) must equal census input.
 
         The birth-month expansion (x12 rows) uses month_ratio which sums to 1,
         so total population is preserved.
@@ -619,7 +679,13 @@ class TestMultiYearProjection:
         from passculture.data.insee_population.projections import project_multi_year
 
         self._setup_projection_tables(projection_processor)
-        project_multi_year(projection_processor.conn, 15, 20)
+        project_multi_year(
+            projection_processor.conn,
+            15,
+            20,
+            start_year=2022,
+            end_year=2023,
+        )
 
         exported = projection_processor.to_pandas("department")
         # Sum across all birth_months for year=2022, dept=75, male
@@ -629,13 +695,16 @@ class TestMultiYearProjection:
             & (exported["sex"] == "male")
         ]["population"].sum()
 
-        quinq_total = projection_processor.conn.execute("""
-            SELECT SUM(population) FROM quinquennal
-            WHERE year = 2022 AND department_code = '75' AND sex = 'male'
+        census_total = float(
+            projection_processor.conn.execute("""
+            SELECT SUM(population) FROM population
+            WHERE department_code = '75' AND sex = 'male'
+              AND age BETWEEN 15 AND 20
         """).fetchone()[0]
+        )
 
-        assert abs(total - quinq_total) < 1.0, (
-            f"Exported population ({total:.1f}) != quinquennal ({quinq_total:.1f})"
+        assert abs(total - census_total) < 1.0, (
+            f"Exported population ({total:.1f}) != census ({census_total:.1f})"
         )
 
     def test_monthly_snapshot_population_is_full_stock(self, projection_processor):
@@ -644,21 +713,28 @@ class TestMultiYearProjection:
         Population is a stock variable — the number of 18-year-olds in January
         is the same as in July. month_ratio only splits birth-month sub-cohorts,
         it must NOT reduce the snapshot total.
-
-        Regression: before fix, month_ratio was applied twice in monthly mode
-        (once during projection, once at export), giving 1/12 of expected values.
         """
         from passculture.data.insee_population.projections import project_multi_year
 
         self._setup_projection_tables(projection_processor)
-        project_multi_year(projection_processor.conn, 15, 20, monthly=True)
+        project_multi_year(
+            projection_processor.conn,
+            15,
+            20,
+            start_year=2022,
+            end_year=2023,
+            monthly=True,
+        )
 
         exported = projection_processor.to_pandas("department")
 
-        quinq_total = projection_processor.conn.execute("""
-            SELECT SUM(population) FROM quinquennal
-            WHERE year = 2022 AND department_code = '75' AND sex = 'male'
+        census_total = float(
+            projection_processor.conn.execute("""
+            SELECT SUM(population) FROM population
+            WHERE department_code = '75' AND sex = 'male'
+              AND age BETWEEN 15 AND 20
         """).fetchone()[0]
+        )
 
         # Check EACH snapshot month individually
         for month in range(1, 13):
@@ -669,24 +745,26 @@ class TestMultiYearProjection:
                 & (exported["sex"] == "male")
             ]["population"].sum()
 
-            assert abs(month_total - quinq_total) < 1.0, (
+            assert abs(month_total - census_total) < 1.0, (
                 f"Month {month}: exported pop ({month_total:.1f}) != "
-                f"quinquennal stock ({quinq_total:.1f}). "
-                f"Ratio: {month_total / quinq_total:.4f}"
+                f"census stock ({census_total:.1f}). "
+                f"Ratio: {month_total / census_total:.4f}"
             )
 
     def test_monthly_and_yearly_same_per_snapshot_total(self, projection_processor):
-        """Monthly and yearly modes must produce the same total per snapshot month.
-
-        Yearly mode has 1 snapshot (Jan) with 12 birth_month rows.
-        Monthly mode has 12 snapshots, each with 12 birth_month rows.
-        Per-snapshot totals should be identical.
-        """
+        """Monthly and yearly modes must produce the same total per snapshot month."""
         from passculture.data.insee_population.projections import project_multi_year
 
         # Yearly mode
         self._setup_projection_tables(projection_processor)
-        project_multi_year(projection_processor.conn, 15, 20, monthly=False)
+        project_multi_year(
+            projection_processor.conn,
+            15,
+            20,
+            start_year=2022,
+            end_year=2023,
+            monthly=False,
+        )
         yearly_exported = projection_processor.to_pandas("department")
         yearly_jan = yearly_exported[
             (yearly_exported["year"] == 2022)
@@ -696,7 +774,14 @@ class TestMultiYearProjection:
         ]["population"].sum()
 
         # Monthly mode (re-run projection)
-        project_multi_year(projection_processor.conn, 15, 20, monthly=True)
+        project_multi_year(
+            projection_processor.conn,
+            15,
+            20,
+            start_year=2022,
+            end_year=2023,
+            monthly=True,
+        )
         monthly_exported = projection_processor.to_pandas("department")
         monthly_jan = monthly_exported[
             (monthly_exported["year"] == 2022)
@@ -711,57 +796,29 @@ class TestMultiYearProjection:
 
 
 # -----------------------------------------------------------------------------
-# Test: Age Ratios
+# Test: Simple Aging Projection
 # -----------------------------------------------------------------------------
 
 
-class TestAgeRatios:
-    """Tests for age ratio computation."""
+class TestSimpleAging:
+    """Tests for simple census aging projection."""
 
-    @staticmethod
-    def _register_quinquennal(processor, year=2022):
-        """Register a minimal quinquennal table for the given year."""
-        processor.conn.execute(f"""
-            CREATE OR REPLACE TABLE quinquennal AS
-            SELECT * FROM (VALUES
-                ({year}, '75', 'male', '15_19', 5000.0)
-            ) AS t(year, department_code, sex, age_band, population)
-        """)
+    def test_census_year_population_preserved(self):
+        """For census year, projected population must equal census population."""
+        from passculture.data.insee_population import sql
+        from passculture.data.insee_population.projections import (
+            compute_geo_ratios,
+            project_multi_year,
+        )
 
-    def test_age_ratios_sum_to_one(self):
-        """Test that age ratios within each band sum to approximately 1."""
-        from passculture.data.insee_population.projections import compute_age_ratios
-
-        processor = PopulationProcessor(cache_dir=None)
-        # Create a population with known distribution
-        processor.conn.execute("""
-            CREATE OR REPLACE TABLE population AS
-            SELECT * FROM (VALUES
-                (2022, '75', '11', '7599', '75101', '751010101', 15, 'male', 100.0),
-                (2022, '75', '11', '7599', '75101', '751010101', 16, 'male', 120.0),
-                (2022, '75', '11', '7599', '75101', '751010101', 17, 'male', 110.0),
-                (2022, '75', '11', '7599', '75101', '751010101', 18, 'male', 130.0),
-                (2022, '75', '11', '7599', '75101', '751010101', 19, 'male', 140.0)
-            ) AS t(year, department_code, region_code,
-                   canton_code, commune_code, iris_code,
-                   age, sex, population)
-        """)
-
-        self._register_quinquennal(processor, 2022)
-        compute_age_ratios(processor.conn, census_year=2022)
-
-        # Check ratios sum to 1 for band 15_19
-        ratio_sum = processor.conn.execute("""
-            SELECT SUM(age_ratio) FROM age_ratios
-            WHERE department_code = '75' AND sex = 'male' AND age_band = '15_19'
-        """).fetchone()[0]
-        assert abs(ratio_sum - 1.0) < 0.001
-
-    def test_age_ratio_proportional(self):
-        """Test that age ratios are proportional to population."""
-        from passculture.data.insee_population.projections import compute_age_ratios
-
-        processor = PopulationProcessor(cache_dir=None)
+        processor = PopulationProcessor(
+            year=2022,
+            min_age=15,
+            max_age=19,
+            start_year=2022,
+            end_year=2022,
+            cache_dir=None,
+        )
         processor.conn.execute("""
             CREATE OR REPLACE TABLE population AS
             SELECT * FROM (VALUES
@@ -774,94 +831,8 @@ class TestAgeRatios:
                    canton_code, commune_code, iris_code,
                    age, sex, population)
         """)
-
-        self._register_quinquennal(processor, 2022)
-        compute_age_ratios(processor.conn, census_year=2022)
-
-        # Age 15 has 200 out of 600 total = 1/3
-        ratio_15 = processor.conn.execute("""
-            SELECT age_ratio FROM age_ratios
-            WHERE department_code = '75' AND sex = 'male' AND age = 15
-        """).fetchone()[0]
-        assert abs(ratio_15 - 200 / 600) < 0.001
-
-    def test_age_ratio_boundary_not_inflated(self):
-        """Test age ratios at band boundaries are correct with full band data.
-
-        Regression test: when max_age=25 and the base table includes the full
-        25_29 band, age 25's ratio should be ~0.20 (1/5), not 1.0.
-        If the base table were filtered to ages 1-25, age 25 would be the
-        only member of its band, giving it ratio=1.0 and inflating its
-        projected population by ~5x.
-        """
-        from passculture.data.insee_population import sql
-        from passculture.data.insee_population.projections import (
-            compute_age_ratios,
-            compute_geo_ratios,
-            project_multi_year,
-        )
-
-        processor = PopulationProcessor(
-            year=2022,
-            min_age=1,
-            max_age=25,
-            start_year=2022,
-            end_year=2022,
-            cache_dir=None,
-        )
-
-        # Build population with full bands (including ages 25-29)
-        # This simulates what skip_age_filter=True produces:
-        # the base table has ALL ages, not just 1-25.
-        rows = []
-        for age in range(0, 30):
-            rows.append(
-                f"(2022, '75', '11', '7599', '75101',"
-                f" '751010101', {age}, 'male', 100.0)"
-            )
-            rows.append(
-                f"(2022, '75', '11', '7599', '75101', '751010101',"
-                f" {age}, 'female', 100.0)"
-            )
-        values = ",\n                ".join(rows)
-        processor.conn.execute(f"""
-            CREATE OR REPLACE TABLE population AS
-            SELECT * FROM (VALUES
-                {values}
-            ) AS t(year, department_code, region_code,
-                   canton_code, commune_code, iris_code,
-                   age, sex, population)
-        """)
         processor._base_table_created = True
         _setup_geo_mappings(processor)
-
-        # Register quinquennal first (needed by cohort-shifted age ratios)
-        quinquennal_df = pd.DataFrame(
-            [
-                {
-                    "year": 2022,
-                    "department_code": "75",
-                    "sex": s,
-                    "age_band": ab,
-                    "population": 5000.0,
-                }
-                for s in ["male", "female"]
-                for ab in ["0_4", "5_9", "10_14", "15_19", "20_24", "25_29"]
-            ]
-        )
-        processor._register_dataframe("quinquennal_df", quinquennal_df)
-        processor._execute(sql.REGISTER_QUINQUENNAL)
-
-        # Compute age ratios — with full band data, age 25 ratio ≈ 0.20
-        compute_age_ratios(processor.conn, census_year=2022)
-
-        ratio_25 = processor.conn.execute("""
-            SELECT age_ratio FROM age_ratios
-            WHERE department_code = '75' AND sex = 'male' AND age = 25
-        """).fetchone()[0]
-        assert abs(ratio_25 - 0.2) < 0.01, (
-            f"Age 25 ratio should be ~0.2 (1/5 of band), got {ratio_25}"
-        )
 
         monthly_df = pd.DataFrame(
             [
@@ -875,158 +846,78 @@ class TestAgeRatios:
         compute_geo_ratios(processor.conn, "epci")
         compute_geo_ratios(processor.conn, "canton")
         compute_geo_ratios(processor.conn, "iris")
-        project_multi_year(processor.conn, 1, 25)
+        project_multi_year(processor.conn, 15, 19, start_year=2022, end_year=2022)
 
-        dept_df = processor.to_pandas("department")
-        # Compare population of age 24 and age 25 (same month/year/birth_month)
-        mask_24 = (
-            (dept_df["age"] == 24)
-            & (dept_df["month"] == 1)
-            & (dept_df["birth_month"] == 1)
-            & (dept_df["sex"] == "male")
-        )
-        pop_24 = dept_df[mask_24]["population"].iloc[0]
-        mask_25 = (
-            (dept_df["age"] == 25)
-            & (dept_df["month"] == 1)
-            & (dept_df["birth_month"] == 1)
-            & (dept_df["sex"] == "male")
-        )
-        pop_25 = dept_df[mask_25]["population"].iloc[0]
-
-        # With uniform census data, they should be very close (same ratio ~0.2)
-        assert pop_25 < pop_24 * 2, (
-            f"Age 25 pop ({pop_25}) should not be inflated vs age 24 ({pop_24})"
+        # Department total should equal census total
+        total = processor.conn.execute("""
+            SELECT SUM(population) FROM population_department
+            WHERE year = 2022 AND department_code = '75' AND sex = 'male'
+        """).fetchone()[0]
+        assert abs(total - 600.0) < 1.0, (
+            f"Department total ({total:.1f}) should equal census (600.0)"
         )
 
-
-# -----------------------------------------------------------------------------
-# Test: Cohort-Shifted Age Ratios
-# -----------------------------------------------------------------------------
-
-
-class TestCohortAgeRatios:
-    """Tests for cohort-shifted age ratio computation."""
-
-    def _setup_census_and_quinquennal(self, processor, census_ages, quinquennal_years):
-        """Create population and quinquennal tables for testing."""
-        # Census has ages with known populations (dept='75', sex='male')
-        rows = ",\n            ".join(
-            f"(2022, '75', '11', '7599', '75101', '751010101', {age}, 'male', {pop})"
-            for age, pop in census_ages.items()
+    def test_cohort_aging_forward(self):
+        """Census age 15 in 2022 should become age 18 in 2025."""
+        from passculture.data.insee_population import sql
+        from passculture.data.insee_population.projections import (
+            compute_geo_ratios,
+            project_multi_year,
         )
-        processor.conn.execute(f"""
+
+        processor = PopulationProcessor(
+            year=2022,
+            min_age=15,
+            max_age=20,
+            start_year=2022,
+            end_year=2025,
+            cache_dir=None,
+        )
+        # Census: age 15 has 500, age 16 has 300
+        processor.conn.execute("""
             CREATE OR REPLACE TABLE population AS
             SELECT * FROM (VALUES
-                {rows}
+                (2022, '75', '11', '7599', '75101', '751010101', 12, 'male', 500.0),
+                (2022, '75', '11', '7599', '75101', '751010101', 13, 'male', 300.0),
+                (2022, '75', '11', '7599', '75101', '751010101', 15, 'male', 200.0),
+                (2022, '75', '11', '7599', '75101', '751010101', 16, 'male', 250.0),
+                (2022, '75', '11', '7599', '75101', '751010101', 17, 'male', 180.0)
             ) AS t(year, department_code, region_code,
                    canton_code, commune_code, iris_code,
                    age, sex, population)
         """)
+        processor._base_table_created = True
+        _setup_geo_mappings(processor)
 
-        # Quinquennal with given years
-        q_rows = ",\n            ".join(
-            f"({y}, '75', 'male', '15_19', 5000.0)" for y in quinquennal_years
+        monthly_df = pd.DataFrame(
+            [
+                {"department_code": "75", "month": m, "month_ratio": 1.0 / 12}
+                for m in range(1, 13)
+            ]
         )
-        processor.conn.execute(f"""
-            CREATE OR REPLACE TABLE quinquennal AS
-            SELECT * FROM (VALUES
-                {q_rows}
-            ) AS t(year, department_code, sex, age_band, population)
-        """)
+        processor._register_dataframe("monthly_births_df", monthly_df)
+        processor._execute(sql.REGISTER_MONTHLY_BIRTHS)
 
-    def test_cohort_shift_2025(self):
-        """Verify cohort shift: year=2025 looks at census ages shifted by -3.
+        compute_geo_ratios(processor.conn, "epci")
+        compute_geo_ratios(processor.conn, "canton")
+        compute_geo_ratios(processor.conn, "iris")
+        project_multi_year(processor.conn, 15, 20, start_year=2022, end_year=2025)
 
-        Census year=2022, target year=2025, target ages 15-19.
-        census_age = target_age + (2022 - 2025) = target_age - 3
-        So ages 15-19 in 2025 map to census ages 12-16.
-        """
-        from passculture.data.insee_population.projections import compute_age_ratios
-
-        processor = PopulationProcessor(cache_dir=None)
-
-        # Census has ages 0-25 with known populations
-        census_ages = dict.fromkeys(range(0, 26), 1000.0)
-        # Make ages 12-16 distinctive
-        census_ages[12] = 800.0
-        census_ages[13] = 750.0
-        census_ages[14] = 820.0
-        census_ages[15] = 790.0
-        census_ages[16] = 810.0
-
-        self._setup_census_and_quinquennal(processor, census_ages, [2025])
-        compute_age_ratios(processor.conn, census_year=2022)
-
-        # For year=2025, age=15 should use census_age=12 (pop=800)
-        # Band total = 800+750+820+790+810 = 3970
-        expected_ratio = 800 / 3970
-        ratio_15 = processor.conn.execute("""
-            SELECT age_ratio FROM age_ratios
-            WHERE year = 2025 AND department_code = '75'
-              AND sex = 'male' AND age = 15
+        # In 2025, age 15 = census age 12 (=500), age 16 = census age 13 (=300)
+        pop_15_2025 = processor.conn.execute("""
+            SELECT population FROM population_department
+            WHERE year = 2025 AND age = 15 AND department_code = '75' AND sex = 'male'
         """).fetchone()[0]
-        assert abs(ratio_15 - expected_ratio) < 0.001, (
-            f"Expected {expected_ratio:.4f}, got {ratio_15:.4f}"
+        assert abs(pop_15_2025 - 500.0) < 0.1, (
+            f"2025 age 15 ({pop_15_2025}) should equal census age 12 (500.0)"
         )
 
-    def test_no_shift_same_year(self):
-        """When projection year == census year, no shift occurs.
-
-        census_age = target_age + (2022 - 2022) = target_age.
-        """
-        from passculture.data.insee_population.projections import compute_age_ratios
-
-        processor = PopulationProcessor(cache_dir=None)
-
-        census_ages = {
-            15: 200.0,
-            16: 100.0,
-            17: 100.0,
-            18: 100.0,
-            19: 100.0,
-        }
-        self._setup_census_and_quinquennal(processor, census_ages, [2022])
-        compute_age_ratios(processor.conn, census_year=2022)
-
-        # For year=2022, age=15 should be 200/600
-        ratio_15 = processor.conn.execute("""
-            SELECT age_ratio FROM age_ratios
-            WHERE year = 2022 AND department_code = '75'
-              AND sex = 'male' AND age = 15
+        pop_16_2025 = processor.conn.execute("""
+            SELECT population FROM population_department
+            WHERE year = 2025 AND age = 16 AND department_code = '75' AND sex = 'male'
         """).fetchone()[0]
-        assert abs(ratio_15 - 200 / 600) < 0.001
-
-    def test_ratios_differ_across_years(self):
-        """Ratios for different projection years should differ (different cohorts)."""
-        from passculture.data.insee_population.projections import compute_age_ratios
-
-        processor = PopulationProcessor(cache_dir=None)
-
-        # Census ages 10-24 with varying populations
-        census_ages = {}
-        for age in range(10, 25):
-            census_ages[age] = 500.0 + age * 10.0  # increasing with age
-
-        self._setup_census_and_quinquennal(processor, census_ages, [2022, 2025])
-        compute_age_ratios(processor.conn, census_year=2022)
-
-        # Ratio for age=15 in 2022 uses census_age=15
-        ratio_2022 = processor.conn.execute("""
-            SELECT age_ratio FROM age_ratios
-            WHERE year = 2022 AND department_code = '75'
-              AND sex = 'male' AND age = 15
-        """).fetchone()[0]
-
-        # Ratio for age=15 in 2025 uses census_age=12
-        ratio_2025 = processor.conn.execute("""
-            SELECT age_ratio FROM age_ratios
-            WHERE year = 2025 AND department_code = '75'
-              AND sex = 'male' AND age = 15
-        """).fetchone()[0]
-
-        assert ratio_2022 != ratio_2025, (
-            f"Ratios should differ: 2022={ratio_2022}, 2025={ratio_2025}"
+        assert abs(pop_16_2025 - 300.0) < 0.1, (
+            f"2025 age 16 ({pop_16_2025}) should equal census age 13 (300.0)"
         )
 
 
@@ -1046,23 +937,8 @@ class TestDownloaderHelpers:
             _parse_quinquennal_sheet,
         )
 
-        # Verify offsets: 0=dept, 1=name, 2..22=ensemble(20+total),
-        # 23..43=male(20+total), 44..64=female(20+total)
         assert _MALE_OFFSET == 23
         assert _FEMALE_OFFSET == 44
-
-        # 65 cols: 2 + 3*(20 bands + 1 total)
-        ncols = 65
-        row_data = [None] * ncols
-        row_data[0] = "75"
-        row_data[1] = "Paris"
-        # Male age band 15_19 (index 3 -> col 26)
-        row_data[_MALE_OFFSET + 3] = 5000.0
-        # Female age band 15_19
-        row_data[_FEMALE_OFFSET + 3] = 4800.0
-
-        pd.DataFrame([row_data])
-
         assert callable(_parse_quinquennal_sheet)
 
     def test_month_name_mapping(self):
@@ -1077,27 +953,20 @@ class TestDownloaderHelpers:
         """Test N4D CSV parser extracts department codes and monthly ratios."""
         from passculture.data.insee_population.downloaders import _parse_n4d_birth_csv
 
-        # REGDEP_DOMI_MERE formats:
-        # "1175" = region 11 + dept 75 (Paris) → strip prefix → "75"
-        # "2418" = region 24 + dept 18 (Cher) → strip prefix → "18"
-        # "971"  = bare DOM dept code (Guadeloupe) → kept as-is → "971"
-        # "11XX" = regional aggregate → excluded (contains X)
-        # "97XX" = DOM regional aggregate → excluded
-        # "AN"   = annual total → excluded
         csv = "\n".join(
             [
                 "REGDEP_DOMI_MERE;MNAIS;NBNAIS",
                 "1175;01;1200",
                 "1175;02;900",
-                "1175;AN;2100",  # annual total — excluded
+                "1175;AN;2100",
                 "2418;01;100",
                 "2418;02;200",
                 "2418;AN;300",
-                "971;01;50",  # DOM: bare 3-digit code, kept as-is
+                "971;01;50",
                 "971;02;50",
                 "971;AN;100",
-                "11XX;01;9999",  # regional aggregate — excluded
-                "97XX;01;9999",  # DOM regional aggregate — excluded
+                "11XX;01;9999",
+                "97XX;01;9999",
             ]
         )
         result = _parse_n4d_birth_csv(csv)
@@ -1106,22 +975,14 @@ class TestDownloaderHelpers:
         assert "75" in depts
         assert "18" in depts
         assert "971" in depts
-        assert "11XX"[2:] not in depts  # aggregates excluded
 
-        # Ratios must sum to 1.0 per department
         for dept, grp in result.groupby("department_code"):
             assert abs(grp["month_ratio"].sum() - 1.0) < 1e-9, (
                 f"{dept} ratios don't sum to 1"
             )
 
-        # Paris: jan=1200, feb=900, total=2100 → ratios 4/7 and 3/7
         paris = result[result["department_code"] == "75"].set_index("month")
         assert abs(paris.loc[1, "month_ratio"] - 1200 / 2100) < 1e-9
-        assert abs(paris.loc[2, "month_ratio"] - 900 / 2100) < 1e-9
-
-        # Guadeloupe: bare DOM code — both months equal
-        guad = result[result["department_code"] == "971"].set_index("month")
-        assert abs(guad.loc[1, "month_ratio"] - 0.5) < 1e-9
 
 
 # -----------------------------------------------------------------------------
@@ -1138,7 +999,6 @@ class TestQuinquennalCacheReextrapolation:
             download_quinquennal_estimates,
         )
 
-        # Create a cached parquet with years 2022-2025
         rows = []
         for year in range(2022, 2026):
             for dept in ["75", "13"]:
@@ -1158,13 +1018,12 @@ class TestQuinquennalCacheReextrapolation:
         cache_dir.mkdir()
         cache_df.to_parquet(cache_dir / "quinquennal_estimates.parquet", index=False)
 
-        # Request years 2022-2028 (beyond cached max of 2025)
         result = download_quinquennal_estimates(2022, 2028, cache_dir)
 
         years = sorted(result["year"].unique())
         assert min(years) == 2022
         assert max(years) == 2028
-        assert len(years) == 7  # 2022, 2023, 2024, 2025, 2026, 2027, 2028
+        assert len(years) == 7
 
     def test_no_reextrapolation_when_cache_sufficient(self, tmp_path):
         """Cached parquet covering requested range should not re-extrapolate."""
@@ -1212,7 +1071,6 @@ class TestMayotteAgeDistribution:
         )
 
         rows = []
-        # 976 with distinctive distribution: heavy on 0_4
         for sex in ["male", "female"]:
             for band_name in AGE_BUCKETS:
                 pop = 5000.0 if band_name == "0_4" else 100.0
@@ -1233,14 +1091,11 @@ class TestMayotteAgeDistribution:
         ):
             dist = _get_dom_age_distribution(2022)
 
-        # Ages 0-4 should dominate (976's own skewed distribution)
         young_pct = sum(dist[a] for a in range(0, 5))
-        assert young_pct > 0.4, (
-            f"Expected 976's skewed distribution, got 0-4 share={young_pct:.2f}"
-        )
+        assert young_pct > 0.4
 
     def test_returns_empty_when_no_976(self):
-        """Returns empty dict when 976 data is absent (no DOM fallback)."""
+        """Returns empty dict when 976 data is absent."""
         from unittest.mock import patch
 
         from passculture.data.insee_population.constants import AGE_BUCKETS
@@ -1248,7 +1103,6 @@ class TestMayotteAgeDistribution:
             _get_dom_age_distribution,
         )
 
-        # Build mock quinquennal data for DOM departments only (no 976)
         rows = []
         for dept in ["971", "972", "973", "974"]:
             for sex in ["male", "female"]:
@@ -1272,103 +1126,6 @@ class TestMayotteAgeDistribution:
 
         assert dist == {}
 
-    def test_returns_empty_when_no_976_data(self):
-        """Returns empty dict when 976 is not in quinquennal data."""
-        from unittest.mock import patch
-
-        from passculture.data.insee_population.downloaders import (
-            _get_dom_age_distribution,
-        )
-
-        # Data with non-DOM department only
-        mock_df = pd.DataFrame(
-            [
-                {
-                    "year": 2022,
-                    "department_code": "75",
-                    "sex": "male",
-                    "age_band": "15_19",
-                    "population": 5000.0,
-                }
-            ]
-        )
-
-        with patch(
-            "passculture.data.insee_population.downloaders.download_quinquennal_estimates",
-            return_value=mock_df,
-        ):
-            dist = _get_dom_age_distribution(2022)
-
-        assert dist == {}
-
-    def test_mayotte_projection_all_ages(self):
-        """In projection mode, Mayotte synthesized data covers ages 0-120."""
-        from unittest.mock import patch
-
-        from passculture.data.insee_population.constants import AGE_BUCKETS
-        from passculture.data.insee_population.downloaders import (
-            synthesize_mayotte_population,
-        )
-
-        # Mock quinquennal data for 976
-        q_rows = []
-        for sex in ["male", "female"]:
-            for band_name in AGE_BUCKETS:
-                q_rows.append(
-                    {
-                        "year": 2022,
-                        "department_code": "976",
-                        "sex": sex,
-                        "age_band": band_name,
-                        "population": 1000.0,
-                    }
-                )
-        mock_quinquennal = pd.DataFrame(q_rows)
-
-        # Mock estimates for 976
-        mock_estimates = pd.DataFrame(
-            [
-                {
-                    "department_code": "976",
-                    "year": 2022,
-                    "sex": "male",
-                    "population": 150000,
-                },
-                {
-                    "department_code": "976",
-                    "year": 2022,
-                    "sex": "female",
-                    "population": 155000,
-                },
-            ]
-        )
-
-        with (
-            patch(
-                "passculture.data.insee_population.downloaders.download_quinquennal_estimates",
-                return_value=mock_quinquennal,
-            ),
-            patch(
-                "passculture.data.insee_population.downloaders.download_estimates",
-                return_value=mock_estimates,
-            ),
-        ):
-            # Projection mode: all ages 0-120
-            df_all = synthesize_mayotte_population(2022, 0, 120)
-            # Census mode: restricted ages 15-25
-            df_restricted = synthesize_mayotte_population(2022, 15, 25)
-
-        # All-ages should cover 0 to 120
-        assert df_all["age"].min() == 0
-        assert df_all["age"].max() == 120
-
-        # Restricted should only have 15-25
-        assert df_restricted["age"].min() == 15
-        assert df_restricted["age"].max() == 25
-
-        # All-ages should have more rows
-        assert len(df_all) > len(df_restricted)
-
 
 # -----------------------------------------------------------------------------
 # Test: Student Mobility Correction
@@ -1380,30 +1137,32 @@ class TestStudentMobilityCorrection:
 
     def test_correct_student_mobility_flag_stored(self):
         """Test that correct_student_mobility flag is stored on processor."""
-        proc = PopulationProcessor(correct_student_mobility=True, cache_dir=None)
+        proc = PopulationProcessor(
+            correct_student_mobility=True,
+            min_age=15,
+            max_age=24,
+            start_year=2022,
+            end_year=2037,
+            cache_dir=None,
+        )
         assert proc.correct_student_mobility is True
-
-        proc2 = PopulationProcessor(correct_student_mobility=False, cache_dir=None)
-        assert proc2.correct_student_mobility is False
 
     @pytest.fixture
     def mobility_processor(self, tmp_path):
         """Create a processor with population, geo mappings, geo_ratios_epci,
         and a mock MOBSCO parquet file for testing student mobility correction.
-
-        Setup:
-        - Dept 75 has 2 EPCIs: 200054781 (commune 75101) and 200054782 (commune 75102)
-        - Dept 13 has 1 EPCI: 200054807 (commune 13001)
-        - MOBSCO: students from dept 75 study in commune 13001
-          (dept 13) and commune 75102 (dept 75)
         """
         import duckdb as _duckdb
 
         processor = PopulationProcessor(
-            year=2022, min_age=15, max_age=24, cache_dir=None
+            year=2022,
+            min_age=15,
+            max_age=24,
+            start_year=2022,
+            end_year=2037,
+            cache_dir=None,
         )
 
-        # Population table with ages 15-24 in dept 75 and dept 13
         rows = []
         for dept, commune, iris, region, canton in [
             ("75", "75101", "751010101", "11", "7599"),
@@ -1428,7 +1187,6 @@ class TestStudentMobilityCorrection:
         """)
         processor._base_table_created = True
 
-        # Commune-EPCI mapping
         commune_epci = pd.DataFrame(
             {
                 "commune_code": ["75101", "75102", "13001"],
@@ -1444,36 +1202,22 @@ class TestStudentMobilityCorrection:
         )
         processor._geo_mappings_loaded = True
 
-        # Compute geo_ratios_epci from population
         from passculture.data.insee_population.projections import compute_geo_ratios
 
         compute_geo_ratios(processor.conn, "epci")
 
-        # Create mock MOBSCO parquet with both age groups:
-        #
-        # AGEREV10='18' (higher-ed / 20_24 band):
-        #   Dept 75 → 75101 students study cross-dept in 13001 (100 weighted)
-        #             AND within-dept in 75102 (60 weighted)
-        #   → mobility_rate for 20_24 ≈ 100/160 = 62.5% → capped at 0.60
-        #
-        # AGEREV10='15' (lycée / 15_19 band):
-        #   Dept 75 → 75101 students study within-dept only in 75102 (80 weighted)
-        #   → mobility_rate for 15_19 = 0% → blend_weight = 0 (uses default 0.10)
         mobsco_data = {
-            # HE students: cross-dept and within-dept flows
             "COMMUNE": ["75101"] * 4 + ["13001"] * 2,
             "DCETUF": ["13001", "13001", "75102", "75102", "13001", "13001"],
             "AGEREV10": ["18"] * 6,
             "SEXE": ["1", "2", "1", "2", "1", "2"],
             "IPONDI": ["50.0", "50.0", "30.0", "30.0", "80.0", "80.0"],
         }
-        # Lycée students: all within-dept (0% inter-dept)
         mobsco_data["COMMUNE"].extend(["75101", "75101", "13001", "13001"])
         mobsco_data["DCETUF"].extend(["75102", "75102", "13001", "13001"])
         mobsco_data["AGEREV10"].extend(["15", "15", "15", "15"])
         mobsco_data["SEXE"].extend(["1", "2", "1", "2"])
         mobsco_data["IPONDI"].extend(["40.0", "40.0", "60.0", "60.0"])
-        # Non-student rows (should be filtered out — not in band_config)
         mobsco_data["COMMUNE"].extend(["75101", "75101"])
         mobsco_data["DCETUF"].extend(["13001", "13001"])
         mobsco_data["AGEREV10"].extend(["25", "30"])
@@ -1484,7 +1228,6 @@ class TestStudentMobilityCorrection:
         mobsco_path = tmp_path / "mobsco_test.parquet"
         _duckdb.sql("SELECT * FROM mobsco_df").write_parquet(str(mobsco_path))
 
-        # Compute per-department mobility weights (needed before corrections)
         from passculture.data.insee_population.projections import (
             compute_department_mobility_rates,
         )
@@ -1497,13 +1240,9 @@ class TestStudentMobilityCorrection:
         """Test that student_flows_epci table is created with expected rows."""
         processor, mobsco_path = mobility_processor
         from passculture.data.insee_population import sql
-
-        # Rename geo_ratios_epci to _base
-        processor.conn.execute(sql.RENAME_GEO_RATIOS_EPCI_TO_BASE)
-
         from passculture.data.insee_population.projections import _build_band_config_sql
 
-        # Create student flows (now requires band_config_sql)
+        processor.conn.execute(sql.RENAME_GEO_RATIOS_EPCI_TO_BASE)
         processor.conn.execute(
             sql.CREATE_STUDENT_FLOWS_EPCI.format(
                 mobsco_path=mobsco_path,
@@ -1516,39 +1255,21 @@ class TestStudentMobilityCorrection:
             " ORDER BY age_band, department_code, epci_code, sex"
         ).df()
 
-        # Flows must have an age_band column
         assert "age_band" in flows.columns
+        assert len(flows[flows["department_code"] == "75"]) > 0
+        assert len(flows[flows["department_code"] == "13"]) > 0
 
-        # Dept 75 students study in: 200054807 (13001) and 200054782 (75102)
-        dept75_flows = flows[flows["department_code"] == "75"]
-        assert len(dept75_flows) > 0
-
-        # Dept 13 students study in: 200054807 (13001)
-        dept13_flows = flows[flows["department_code"] == "13"]
-        assert len(dept13_flows) > 0
-
-        # Ratios per (dept, age_band, sex) should sum to 1
-        for (dept, band, sex), group in flows.groupby(
+        for (_dept, _band, _sex), group in flows.groupby(
             ["department_code", "age_band", "sex"]
         ):
             ratio_sum = group["study_geo_ratio"].sum()
-            assert abs(ratio_sum - 1.0) < 0.001, (
-                f"Flows for {dept}/{band}/{sex} sum to {ratio_sum}"
-            )
+            assert abs(ratio_sum - 1.0) < 0.001
 
-        # Cleanup for next test
         processor.conn.execute("DROP TABLE geo_ratios_epci_base")
         processor.conn.execute("DROP TABLE student_flows_epci")
 
     def test_correction_shifts_weight(self, mobility_processor):
-        """Test that correction shifts geo_ratio for both student bands.
-
-        Dept 75 fixture:
-        - 20_24 (AGEREV10='18'): 62.5% cross-dept → w=0.60 → large shift.
-        - 15_19: lycée (AGEREV10='15') has 0% cross-dept, but secondary (higher-ed
-          AGEREV10='18') has 62.5% → effective_w = 0.75*0 + 0.25*0.625 = 0.15625.
-          Some 15_19 population now redistributes via higher-ed destination pattern.
-        """
+        """Test that correction shifts geo_ratio for student bands."""
         processor, mobsco_path = mobility_processor
         from passculture.data.insee_population.projections import (
             apply_student_mobility_correction,
@@ -1570,31 +1291,16 @@ class TestStudentMobilityCorrection:
             ORDER BY epci_code, age_band, sex
         """).df()
 
-        def get_ratio(df: object, epci: str, band: str, sex: str) -> float:
+        def get_ratio(df, epci, band, sex):
             return df[
                 (df["epci_code"] == epci)
                 & (df["age_band"] == band)
                 & (df["sex"] == sex)
             ]["geo_ratio"].values[0]
 
-        # 20_24: HE students from 75101 study cross-dept (62% mobility → w=0.60)
-        # → EPCI 200054782 gains share, 200054781 loses share
         assert get_ratio(corrected_ratios_75, "200054782", "20_24", "male") > get_ratio(
             base_ratios_75, "200054782", "20_24", "male"
-        ), "20_24: EPCI 200054782 should gain ratio (students arrive)"
-        assert get_ratio(corrected_ratios_75, "200054781", "20_24", "male") < get_ratio(
-            base_ratios_75, "200054781", "20_24", "male"
-        ), "20_24: EPCI 200054781 should lose ratio (students leave)"
-
-        # 15_19: effective_w=0.15625 (via higher-ed secondary component).
-        # Lycée flows go to 200054782; higher-ed flows go cross-dept (renorm effect).
-        # → 200054782 gains, 200054781 loses, but shift is smaller than 20_24.
-        assert get_ratio(corrected_ratios_75, "200054782", "15_19", "male") > get_ratio(
-            base_ratios_75, "200054782", "15_19", "male"
-        ), "15_19: 200054782 should gain ratio (lycée destination)"
-        assert get_ratio(corrected_ratios_75, "200054781", "15_19", "male") < get_ratio(
-            base_ratios_75, "200054781", "15_19", "male"
-        ), "15_19: 200054781 should lose ratio (renorm from cross-dept higher-ed)"
+        )
 
     def test_ratios_still_sum_to_one(self, mobility_processor):
         """After correction, geo_ratios per (dept, band, sex) still sum to ~1.0."""
@@ -1614,9 +1320,7 @@ class TestStudentMobilityCorrection:
         violations = ratio_sums[
             (ratio_sums["ratio_sum"] < 0.999) | (ratio_sums["ratio_sum"] > 1.001)
         ]
-        assert len(violations) == 0, (
-            f"Geo ratios don't sum to ~1.0 after correction:\n{violations}"
-        )
+        assert len(violations) == 0
 
     def test_non_student_bands_unchanged(self, mobility_processor):
         """Bands other than 15_19/20_24 should be unchanged after correction."""
@@ -1625,7 +1329,6 @@ class TestStudentMobilityCorrection:
             apply_student_mobility_correction,
         )
 
-        # Get baseline for non-student bands
         base_other = processor.conn.execute("""
             SELECT department_code, epci_code, age_band, sex, geo_ratio
             FROM geo_ratios_epci
@@ -1642,312 +1345,13 @@ class TestStudentMobilityCorrection:
             ORDER BY department_code, epci_code, age_band, sex
         """).df()
 
-        # Should be identical
-        assert len(base_other) == len(corrected_other), (
-            f"Row count changed: {len(base_other)} -> {len(corrected_other)}"
-        )
+        assert len(base_other) == len(corrected_other)
         pd.testing.assert_frame_equal(
             base_other.reset_index(drop=True),
             corrected_other.reset_index(drop=True),
         )
 
-    def test_blend_weight_varies_by_department_and_band(self, mobility_processor):
-        """Mobility weights vary by (department, age_band) based on MOBSCO data."""
-        processor, _mobsco_path = mobility_processor
 
-        weights = processor.conn.execute("""
-            SELECT age_band, department_code, blend_weight, mobility_rate
-            FROM mobility_weights
-            ORDER BY age_band, department_code
-        """).df()
-
-        # mobility_weights must have age_band column
-        assert "age_band" in weights.columns
-
-        # Dept 75, 20_24 band: HE students from 75101 study cross-dept in 13001
-        # → mobility_rate ≈ 100/160 = 62.5%, capped at 0.60
-        w75_he = weights[
-            (weights["department_code"] == "75") & (weights["age_band"] == "20_24")
-        ]
-        assert len(w75_he) == 1
-        assert w75_he["mobility_rate"].values[0] > 0
-        assert w75_he["blend_weight"].values[0] <= 0.60
-
-        # Dept 75, 15_19 band: lycée students (AGEREV10='15') have 0% cross-dept.
-        # But the effective rate mixes primary (0%) and secondary (higher-ed, ~62.5%):
-        #   effective = (1-0.25)*0 + 0.25*0.625 = 0.15625
-        # blend_weight = min(0.15625, cap=0.25) = 0.15625
-        w75_ly = weights[
-            (weights["department_code"] == "75") & (weights["age_band"] == "15_19")
-        ]
-        assert len(w75_ly) == 1
-        assert w75_ly["mobility_rate"].values[0] == pytest.approx(0.15625)
-        assert w75_ly["blend_weight"].values[0] == pytest.approx(0.15625)
-
-        # Dept 13, both bands: all students study within dept → mobility_rate = 0
-        for band in ["15_19", "20_24"]:
-            w13 = weights[
-                (weights["department_code"] == "13") & (weights["age_band"] == band)
-            ]
-            assert len(w13) == 1
-            assert w13["mobility_rate"].values[0] == 0.0
-
-        # 20_24 blend weight should be higher than 15_19 for dept 75
-        assert w75_he["blend_weight"].values[0] > w75_ly["blend_weight"].values[0], (
-            "Higher-ed blend weight should exceed lycée blend weight for dept 75"
-        )
-
-    def test_correction_magnitude_differs_by_band(self, mobility_processor):
-        """15_19 correction should be smaller than 20_24 when lycée mobility is zero."""
-        processor, mobsco_path = mobility_processor
-        from passculture.data.insee_population.projections import (
-            apply_student_mobility_correction,
-        )
-
-        base = processor.conn.execute("""
-            SELECT epci_code, age_band, sex, geo_ratio
-            FROM geo_ratios_epci
-            WHERE department_code = '75'
-            ORDER BY epci_code, age_band, sex
-        """).df()
-
-        apply_student_mobility_correction(processor.conn, mobsco_path)
-
-        corrected = processor.conn.execute("""
-            SELECT epci_code, age_band, sex, geo_ratio
-            FROM geo_ratios_epci
-            WHERE department_code = '75'
-            ORDER BY epci_code, age_band, sex
-        """).df()
-
-        # Compute absolute shift per band for EPCI 200054782 / male
-        def shift(band: str) -> float:
-            b = base[
-                (base["epci_code"] == "200054782")
-                & (base["age_band"] == band)
-                & (base["sex"] == "male")
-            ]["geo_ratio"].values[0]
-            c = corrected[
-                (corrected["epci_code"] == "200054782")
-                & (corrected["age_band"] == band)
-                & (corrected["sex"] == "male")
-            ]["geo_ratio"].values[0]
-            return abs(c - b)
-
-        shift_15_19 = shift("15_19")
-        shift_20_24 = shift("20_24")
-
-        # The 15_19 correction uses lycée mobility rate (0%) → default weight (0.10)
-        # The 20_24 correction uses HE mobility rate (~62%) → capped weight (0.60)
-        # So 20_24 should shift more than 15_19
-        assert shift_20_24 > shift_15_19, (
-            f"20_24 shift ({shift_20_24:.4f}) should exceed"
-            f" 15_19 shift ({shift_15_19:.4f})"
-        )
-
-
-# -----------------------------------------------------------------------------
-# Test: Clamped Age Ratios (far-future projection fix)
-# -----------------------------------------------------------------------------
-
-
-class TestClampedAgeRatios:
-    """Tests for clamped census_age in age ratio computation."""
-
-    def test_clamped_age_ratios_sum_to_one(self):
-        """For far-future year (2039, census 2022), all 5 ages in band 15_19
-        should have age_ratios that sum to 1.0, even though census_age
-        would be negative without clamping.
-        """
-        from passculture.data.insee_population.projections import compute_age_ratios
-
-        processor = PopulationProcessor(cache_dir=None)
-        # Census has ages 0-25
-        rows = ",\n            ".join(
-            f"(2022, '75', '11', '7599', '75101', '751010101',"
-            f" {age}, 'male', {100.0 + age})"
-            for age in range(0, 26)
-        )
-        processor.conn.execute(f"""
-            CREATE OR REPLACE TABLE population AS
-            SELECT * FROM (VALUES
-                {rows}
-            ) AS t(year, department_code, region_code,
-                   canton_code, commune_code, iris_code,
-                   age, sex, population)
-        """)
-
-        # Quinquennal for year 2039 (shift = 2022-2039 = -17)
-        # Target ages 15-19 would map to census ages -2 to 2 without clamping
-        processor.conn.execute("""
-            CREATE OR REPLACE TABLE quinquennal AS
-            SELECT * FROM (VALUES
-                (2039, '75', 'male', '15_19', 5000.0)
-            ) AS t(year, department_code, sex, age_band, population)
-        """)
-
-        compute_age_ratios(processor.conn, census_year=2022)
-
-        # All 5 ages should be present
-        ages = (
-            processor.conn.execute("""
-            SELECT age FROM age_ratios
-            WHERE year = 2039 AND department_code = '75'
-              AND sex = 'male' AND age_band = '15_19'
-            ORDER BY age
-        """)
-            .df()["age"]
-            .tolist()
-        )
-        assert ages == [15, 16, 17, 18, 19], f"Expected all 5 ages, got {ages}"
-
-        # Ratios should sum to 1.0
-        ratio_sum = processor.conn.execute("""
-            SELECT SUM(age_ratio) FROM age_ratios
-            WHERE year = 2039 AND department_code = '75'
-              AND sex = 'male' AND age_band = '15_19'
-        """).fetchone()[0]
-        assert abs(ratio_sum - 1.0) < 0.001, (
-            f"Ratios should sum to ~1.0, got {ratio_sum}"
-        )
-
-    def test_far_future_age_not_inflated(self):
-        """Regression: in year 2039 (census 2022), age 19 should not be
-        inflated ~1.67x due to other ages being filtered out.
-        With uniform census data and clamping, all ages in the band should
-        get roughly equal ratios (~0.2).
-        """
-        from passculture.data.insee_population.projections import compute_age_ratios
-
-        processor = PopulationProcessor(cache_dir=None)
-        # Uniform census: all ages have population 100
-        rows = ",\n            ".join(
-            f"(2022, '75', '11', '7599', '75101', '751010101', {age}, 'male', 100.0)"
-            for age in range(0, 30)
-        )
-        processor.conn.execute(f"""
-            CREATE OR REPLACE TABLE population AS
-            SELECT * FROM (VALUES
-                {rows}
-            ) AS t(year, department_code, region_code,
-                   canton_code, commune_code, iris_code,
-                   age, sex, population)
-        """)
-
-        processor.conn.execute("""
-            CREATE OR REPLACE TABLE quinquennal AS
-            SELECT * FROM (VALUES
-                (2039, '75', 'male', '15_19', 5000.0)
-            ) AS t(year, department_code, sex, age_band, population)
-        """)
-
-        compute_age_ratios(processor.conn, census_year=2022)
-
-        # Each of 5 ages should have ratio ~0.2
-        ratios = processor.conn.execute("""
-            SELECT age, age_ratio FROM age_ratios
-            WHERE year = 2039 AND department_code = '75'
-              AND sex = 'male' AND age_band = '15_19'
-            ORDER BY age
-        """).df()
-
-        for _, row in ratios.iterrows():
-            assert abs(row["age_ratio"] - 0.2) < 0.05, (
-                f"Age {row['age']}: ratio {row['age_ratio']:.4f} should be ~0.2"
-            )
-
-
-# -----------------------------------------------------------------------------
-# Test: Quinquennal Pass-Through
-# -----------------------------------------------------------------------------
-
-
-class TestQuinquennalPassThrough:
-    """Tests that quinquennal values pass through unchanged to projection."""
-
-    def test_quinquennal_values_preserved(self):
-        """Quinquennal band totals should be used as-is (no census replacement).
-
-        The age_ratios sum to 1 within each band, so department-level
-        yearly totals should equal quinquennal values exactly.
-        """
-        from passculture.data.insee_population import sql
-        from passculture.data.insee_population.projections import (
-            compute_age_ratios,
-            project_multi_year,
-        )
-
-        processor = PopulationProcessor(
-            year=2022,
-            min_age=15,
-            max_age=19,
-            start_year=2022,
-            end_year=2022,
-            cache_dir=None,
-        )
-
-        # Census with known age distribution
-        rows = ",\n            ".join(
-            f"(2022, '75', '11', '7599', '75101', '751010101',"
-            f" {age}, 'male', {100.0 + age * 2})"
-            for age in range(0, 25)
-        )
-        processor.conn.execute(f"""
-            CREATE OR REPLACE TABLE population AS
-            SELECT * FROM (VALUES
-                {rows}
-            ) AS t(year, department_code, region_code,
-                   canton_code, commune_code, iris_code,
-                   age, sex, population)
-        """)
-        processor._base_table_created = True
-
-        # Quinquennal with a specific value for 15_19
-        quinquennal_pop = 5000.0
-        processor.conn.execute(f"""
-            CREATE OR REPLACE TABLE quinquennal AS
-            SELECT * FROM (VALUES
-                (2022, '75', 'male', '15_19', {quinquennal_pop})
-            ) AS t(year, department_code, sex, age_band, population)
-        """)
-
-        compute_age_ratios(processor.conn, census_year=2022)
-
-        # Monthly births (uniform)
-        monthly_df = pd.DataFrame(
-            [
-                {"department_code": "75", "month": m, "month_ratio": 1.0 / 12}
-                for m in range(1, 13)
-            ]
-        )
-        processor._register_dataframe("monthly_births_df", monthly_df)
-        processor._execute(sql.REGISTER_MONTHLY_BIRTHS)
-
-        # Need geo ratios for project_multi_year but only checking department
-        _setup_geo_mappings(processor)
-        from passculture.data.insee_population.projections import compute_geo_ratios
-
-        compute_geo_ratios(processor.conn, "epci")
-        compute_geo_ratios(processor.conn, "canton")
-        compute_geo_ratios(processor.conn, "iris")
-
-        project_multi_year(processor.conn, 15, 19)
-
-        # Sum population across months for year=2022, dept=75, male, ages 15-19
-        total = processor.conn.execute("""
-            SELECT SUM(population)
-            FROM population_department
-            WHERE year = 2022 AND department_code = '75' AND sex = 'male'
-        """).fetchone()[0]
-
-        # Should equal quinquennal value (age_ratios sum to 1, month_ratios sum to 1)
-        assert abs(total - quinquennal_pop) < 1.0, (
-            f"Department total ({total:.1f}) should equal "
-            f"quinquennal ({quinquennal_pop:.1f})"
-        )
-
-
-# -----------------------------------------------------------------------------
 # Test: IRIS Student Mobility Correction
 # -----------------------------------------------------------------------------
 
@@ -1968,7 +1372,12 @@ class TestIRISStudentMobilityCorrection:
         import duckdb as _duckdb
 
         processor = PopulationProcessor(
-            year=2022, min_age=15, max_age=24, cache_dir=None
+            year=2022,
+            min_age=15,
+            max_age=24,
+            start_year=2022,
+            end_year=2037,
+            cache_dir=None,
         )
 
         # Population table

@@ -27,7 +27,6 @@ def projection_processor() -> PopulationProcessor:
     """Create a processor with projected tables for all 4 levels."""
     from passculture.data.insee_population import sql
     from passculture.data.insee_population.projections import (
-        compute_age_ratios,
         compute_geo_ratios,
         project_multi_year,
     )
@@ -98,27 +97,6 @@ def projection_processor() -> PopulationProcessor:
     )
     processor._geo_mappings_loaded = True
 
-    # Quinquennal estimates
-    quinquennal_df = pd.DataFrame(
-        [
-            {
-                "year": y,
-                "department_code": d,
-                "sex": s,
-                "age_band": "15_19",
-                "population": p,
-            }
-            for y in [2022, 2023]
-            for d, p_base in [("75", 5000.0), ("13", 4000.0)]
-            for s, factor in [("male", 1.0), ("female", 0.95)]
-            for p in [p_base * factor * (1.01 if y == 2023 else 1.0)]
-        ]
-    )
-    processor._register_dataframe("quinquennal_df", quinquennal_df)
-    processor._execute(sql.REGISTER_QUINQUENNAL)
-
-    compute_age_ratios(processor.conn, census_year=2022)
-
     monthly_df = pd.DataFrame(
         [
             {"department_code": d, "month": m, "month_ratio": 1.0 / 12}
@@ -132,7 +110,7 @@ def projection_processor() -> PopulationProcessor:
     compute_geo_ratios(processor.conn, "epci")
     compute_geo_ratios(processor.conn, "canton")
     compute_geo_ratios(processor.conn, "iris")
-    project_multi_year(processor.conn, 15, 20)
+    project_multi_year(processor.conn, 15, 20, start_year=2022, end_year=2023)
 
     return processor
 

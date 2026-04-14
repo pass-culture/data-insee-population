@@ -1,13 +1,12 @@
 """DuckDB-based processor for INSEE population data.
 
-Creates multi-level population tables at department, EPCI, and IRIS levels
-with geo_precision indicators for data reliability.
+Creates multi-level population tables at department, EPCI, canton, and IRIS
+levels with geo_precision indicators for data reliability.
 
-Supports two modes:
-1. Single-year census mode (original): uses INDCVI data directly
-2. Multi-year projection mode: combines quinquennal estimates x age ratios x
-   monthly birth distribution x geographic ratios to produce monthly population
-   with decimal_age and born_date columns.
+Uses simple census aging: population at age A in year Y equals the census
+population at age A-(Y-census_year), with no mortality or migration
+adjustment. Geographic ratios and monthly birth distribution are applied
+on top.
 """
 
 from __future__ import annotations
@@ -25,17 +24,14 @@ from passculture.data.insee_population.constants import (
     DEPARTMENTS_METRO,
     IRIS_SENTINEL_NO_GEO,
     MAX_AGE,
-    MAX_CAGR_EXTENSION,
 )
 from passculture.data.insee_population.downloaders import (
     download_indcvi,
     download_monthly_birth_distribution,
-    download_quinquennal_estimates,
     synthesize_mayotte_population,
 )
 from passculture.data.insee_population.geo_mappings import get_geo_mappings
 from passculture.data.insee_population.projections import (
-    compute_age_ratios,
     compute_geo_ratios,
     project_multi_year,
 )
@@ -100,16 +96,18 @@ class PopulationProcessor:
         self.monthly = monthly
         self.cache_dir = Path(cache_dir) if cache_dir else None
 
-        # Validate forecast horizon
-        max_pipeline_year = year + min_age
-        max_allowed = max_pipeline_year + MAX_CAGR_EXTENSION
-        if end_year > max_allowed:
+        # Validate forecast horizon: simple aging is valid as long as
+        # the youngest cohort in census can be aged to min_age.
+        # census_age = min_age - (end_year - year) >= 0
+        # → end_year <= year + min_age
+        max_valid_year = year + min_age
+        if end_year > max_valid_year:
             raise ValueError(
-                f"end_year={end_year} exceeds maximum reliable forecast year "
-                f"({max_allowed}). With census year {year} and min_age "
-                f"{min_age}, ratio-based projection is valid to "
-                f"{max_pipeline_year} and CAGR can extend up to "
-                f"{MAX_CAGR_EXTENSION} more years."
+                f"end_year={end_year} exceeds maximum valid projection year "
+                f"({max_valid_year}). With census year {year} and min_age "
+                f"{min_age}, simple aging can only project to "
+                f"{max_valid_year} (beyond that, the youngest cohort "
+                f"was not yet born at census time)."
             )
 
         self.conn = duckdb.connect()
@@ -150,10 +148,10 @@ class PopulationProcessor:
         return self
 
     def create_multi_level_tables(self) -> PopulationProcessor:
-        """Create population tables at department, EPCI, and IRIS levels.
+        """Create population tables at department, EPCI, canton, and IRIS levels.
 
-        Produces multi-year monthly projections using quinquennal estimates x
-        age ratios x monthly birth distribution x geographic ratios.
+        Uses simple census aging with monthly birth distribution and
+        geographic ratios to produce multi-year population projections.
 
         Each table includes:
         - All geographic columns (department_code, region_code, etc.)
@@ -165,52 +163,16 @@ class PopulationProcessor:
         return self._create_projected_tables()
 
     def _create_projected_tables(self) -> PopulationProcessor:
-        """Create multi-year projected tables with monthly granularity."""
+        """Create multi-year projected tables with monthly granularity.
+
+        Uses simple census aging: population at age A in year Y equals
+        the census population at age A-(Y-census_year).
+        """
         sy, ey = self.start_year, self.end_year
-        # Limit pipeline to years where cohort-shifted age ratios are valid:
-        # census_age = target_age + (census_year - year) >= 0
-        # → year <= census_year + min_age
-        max_pipeline_year = min(ey, self.year + self.min_age)
-        logger.info("Creating multi-year projected tables ({}-{})...", sy, ey)
-        if max_pipeline_year < ey:
-            logger.info(
-                "  Pipeline valid to {}, CAGR will extend to {}",
-                max_pipeline_year,
-                ey,
-            )
+        logger.info("Creating projected tables ({}-{}, simple aging)...", sy, ey)
 
-        # 1. Download and register quinquennal estimates (needed by age ratios)
-        logger.info("Step 1: Loading quinquennal estimates...")
-        quinquennal_df = download_quinquennal_estimates(
-            self.start_year, max_pipeline_year, self.cache_dir
-        )
-        self._register_dataframe("quinquennal_df", quinquennal_df)
-        self._execute(sql.REGISTER_QUINQUENNAL)
-
-        if self.include_mayotte:
-            mayotte_years = quinquennal_df[quinquennal_df["department_code"] == "976"][
-                "year"
-            ]
-            if mayotte_years.empty:
-                logger.warning(
-                    "  No quinquennal data for Mayotte (976) -- population will be 0"
-                )
-            elif self.start_year < mayotte_years.min():
-                logger.warning(
-                    "  Mayotte (976) quinquennal data starts at"
-                    " {}, population will be 0 for"
-                    " {}-{}",
-                    mayotte_years.min(),
-                    self.start_year,
-                    int(mayotte_years.min()) - 1,
-                )
-
-        # 2. Compute cohort-shifted age ratios from INDCVI base table
-        logger.info("Step 2: Computing cohort-shifted age ratios from census...")
-        compute_age_ratios(self.conn, census_year=self.year)
-
-        # 3. Download and register monthly birth distribution
-        logger.info("Step 3: Loading monthly birth distribution...")
+        # 1. Download and register monthly birth distribution
+        logger.info("Step 1: Loading monthly birth distribution...")
         monthly_births_df = download_monthly_birth_distribution(self.cache_dir)
         if monthly_births_df.empty:
             logger.warning("  Birth data unavailable, using uniform 1/12 distribution")
@@ -242,13 +204,13 @@ class PopulationProcessor:
         self._register_dataframe("monthly_births_df", monthly_births_df)
         self._execute(sql.REGISTER_MONTHLY_BIRTHS)
 
-        # 4. Compute geographic ratios
-        logger.info("Step 4: Computing geographic ratios...")
+        # 2. Compute geographic ratios
+        logger.info("Step 2: Computing geographic ratios...")
         compute_geo_ratios(self.conn, "epci")
         compute_geo_ratios(self.conn, "canton")
         compute_geo_ratios(self.conn, "iris")
 
-        # 4b. Apply student mobility correction to EPCI and IRIS geo ratios
+        # 2b. Apply student mobility correction to EPCI and IRIS geo ratios
         if self.correct_student_mobility:
             from passculture.data.insee_population.downloaders import download_mobsco
             from passculture.data.insee_population.projections import (
@@ -257,22 +219,23 @@ class PopulationProcessor:
                 compute_department_mobility_rates,
             )
 
-            logger.info("Step 4b: Computing department mobility rates...")
+            logger.info("Step 2b: Computing department mobility rates...")
             mobsco_path = download_mobsco(self.cache_dir)
             compute_department_mobility_rates(self.conn, mobsco_path)
 
-            logger.info("Step 4c: Correcting EPCI geo ratios for student mobility...")
+            logger.info("Step 2c: Correcting EPCI geo ratios for student mobility...")
             apply_student_mobility_correction(self.conn, mobsco_path)
 
-            logger.info("Step 4d: Correcting IRIS geo ratios for student mobility...")
+            logger.info("Step 2d: Correcting IRIS geo ratios for student mobility...")
             apply_student_mobility_correction_iris(self.conn, mobsco_path)
 
-        # 5. Project multi-year at all levels
-        logger.info("Step 5: Projecting population...")
+        # 3. Project multi-year at all levels (simple census aging)
+        logger.info("Step 3: Projecting population (simple aging)...")
         project_multi_year(
             self.conn,
             self.min_age,
             self.max_age,
+            start_year=self.start_year,
             end_year=self.end_year,
             census_year=self.year,
             monthly=self.monthly,
