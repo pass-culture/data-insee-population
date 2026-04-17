@@ -1,7 +1,6 @@
 # Design choices
 
-Why the pipeline is shaped the way it is — trade-offs, limits, and the
-reasoning behind each call. For the step-by-step pipeline reference, see
+For the step-by-step pipeline reference, see
 [`method.md`](./method.md). For run-by-run numeric results, see
 [`findings.md`](./findings.md).
 
