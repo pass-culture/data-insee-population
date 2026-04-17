@@ -1661,3 +1661,248 @@ class TestIRISStudentMobilityCorrection:
             base_other.reset_index(drop=True),
             corrected_other.reset_index(drop=True),
         )
+
+
+# -----------------------------------------------------------------------------
+# Test: MNAI month-of-birth distribution (INDREG)
+# -----------------------------------------------------------------------------
+
+
+class TestMnaiBirthDistribution:
+    """Tests for the INDREG/MNAI month-of-birth distribution pipeline.
+
+    These are unit-level tests that call ``_build_mnai_distribution``
+    directly with small mock frames to verify:
+      - big departments keep their own distribution,
+      - small departments inherit their region's distribution,
+      - Mayotte inherits the metropolitan distribution,
+      - ratios sum to 1 per department.
+    """
+
+    @staticmethod
+    def _sample_mnai_rows() -> pd.DataFrame:
+        """Build a tiny MNAI-like frame.
+
+        - Dept '75' (large): skewed toward January (huge weight).
+        - Dept '2A' (small, same region '94' as Corsica): tiny sample; should
+          be replaced by the regional fallback.
+        - Metro-wide default used for Mayotte, which is absent from the
+          frame.
+        """
+        rows = []
+        # Paris (large): 75% January, 25% July (deliberately skewed)
+        for month, weight in [(1, 800_000), (7, 200_000)]:
+            rows.append(
+                {"DEPT": "75", "REGION": "11", "month": month, "IPONDI": weight}
+            )
+        # Corsica South (small): only present via its region '94' fallback
+        for month in range(1, 13):
+            rows.append({"DEPT": "2A", "REGION": "94", "month": month, "IPONDI": 10})
+        # Another small dept in the same region supplying weight to '94'
+        for month in range(1, 13):
+            rows.append({"DEPT": "2B", "REGION": "94", "month": month, "IPONDI": 500})
+        df = pd.DataFrame(rows)
+        df["MNAI"] = df["month"].astype(str).str.zfill(2)
+        return df
+
+    def test_big_department_uses_own_distribution(self):
+        from passculture.data.insee_population.downloaders import (
+            _build_mnai_distribution,
+        )
+
+        result = _build_mnai_distribution(self._sample_mnai_rows())
+        paris = result[result["department_code"] == "75"].set_index("month")
+        assert abs(paris.loc[1, "month_ratio"] - 0.8) < 1e-6
+        assert abs(paris.loc[7, "month_ratio"] - 0.2) < 1e-6
+
+    def test_small_department_uses_region_fallback(self):
+        from passculture.data.insee_population.downloaders import (
+            _build_mnai_distribution,
+        )
+
+        result = _build_mnai_distribution(self._sample_mnai_rows())
+        corsica = result[result["department_code"] == "2A"].set_index("month")
+        # Region 94 is uniform by construction → ~1/12 per month
+        for m in range(1, 13):
+            assert abs(corsica.loc[m, "month_ratio"] - 1 / 12) < 1e-6
+
+    def test_mayotte_uses_metro_aggregate(self):
+        from passculture.data.insee_population.downloaders import (
+            _build_mnai_distribution,
+        )
+
+        result = _build_mnai_distribution(self._sample_mnai_rows())
+        mayotte = result[result["department_code"] == "976"]
+        # Mayotte synthesised from metropolitan aggregate; must exist and
+        # ratios must sum to 1.
+        assert not mayotte.empty
+        assert abs(mayotte["month_ratio"].sum() - 1.0) < 1e-6
+
+    def test_ratios_sum_to_one_per_department(self):
+        from passculture.data.insee_population.downloaders import (
+            _build_mnai_distribution,
+        )
+
+        result = _build_mnai_distribution(self._sample_mnai_rows())
+        for dept, grp in result.groupby("department_code"):
+            assert abs(grp["month_ratio"].sum() - 1.0) < 1e-6, (
+                f"{dept}: ratios sum to {grp['month_ratio'].sum()}"
+            )
+
+    def test_indreg_reader_filters_invalid_months(self, tmp_path):
+        """``_read_indreg_mnai`` must drop rows with MNAI outside 01-12."""
+        from passculture.data.insee_population.downloaders import _read_indreg_mnai
+
+        df = pd.DataFrame(
+            {
+                "DEPT": ["75", "75", "75"],
+                "REGION": ["11", "11", "11"],
+                "MNAI": ["01", "XX", "13"],
+                "IPONDI": [100.0, 100.0, 100.0],
+            }
+        )
+        path = tmp_path / "indreg.parquet"
+        df.to_parquet(path)
+
+        out = _read_indreg_mnai(path)
+        assert list(out["month"]) == [1]
+
+
+# -----------------------------------------------------------------------------
+# Test: Mayotte 2017 POP1B loader
+# -----------------------------------------------------------------------------
+
+
+class TestMayottePop1b:
+    """Tests for the POP1B Mayotte census loader (parser + aging forward)."""
+
+    def test_parse_age_label(self):
+        from passculture.data.insee_population.downloaders import _parse_age_label
+
+        assert _parse_age_label("0") == 0
+        assert _parse_age_label(17) == 17
+        assert _parse_age_label("100 ou plus") == 100
+        assert _parse_age_label("") is None
+        assert _parse_age_label(None) is None
+
+    def test_safe_float_parses_french_numbers(self):
+        from passculture.data.insee_population.downloaders import _safe_float
+
+        assert _safe_float("1 234,5") == 1234.5
+        assert _safe_float(42) == 42.0
+        assert _safe_float(None) == 0.0
+        assert _safe_float("not a number") == 0.0
+
+    def test_extract_pop1b_wide_rows_sums_communes(self):
+        """Wide COM sheet: sum communes to get the Mayotte-wide pyramid."""
+        from passculture.data.insee_population.downloaders import (
+            _extract_pop1b_wide_rows,
+        )
+
+        # Minimal reproduction of INSEE's wide layout:
+        # - row 5 col 1: 'SEXE'; cols 2-4 encode sex 1 (male), col 5 sex 2 (female)
+        # - row 6 col 1: 'AGED100'; cols 2..5 encode ages 0, 1, 2 (male) + 0 (female)
+        # - row 10 col 0: 'CODGEO'; rows 11-12 are communes
+        raw = pd.DataFrame(
+            [
+                [None] * 6,
+                [None] * 6,
+                [None] * 6,
+                [None] * 6,
+                [None] * 6,
+                ["Variables", "SEXE", "1", "1", "1", "2"],
+                [None, "AGED100", "000", "001", "002", "000"],
+                [None] * 6,
+                [None] * 6,
+                [None] * 6,
+                ["CODGEO", None, None, None, None, None],
+                [97601, None, 10, 20, 30, 40],
+                [97602, None, 5, 15, 25, 35],
+            ]
+        )
+        out = _extract_pop1b_wide_rows(raw)
+        # Male 0 = 10 + 5 = 15; Male 1 = 35; Male 2 = 55; Female 0 = 75
+        males = out[out["sex"] == "male"].set_index("age")
+        assert males.loc[0, "population"] == 15.0
+        assert males.loc[1, "population"] == 35.0
+        assert males.loc[2, "population"] == 55.0
+        females = out[out["sex"] == "female"].set_index("age")
+        assert females.loc[0, "population"] == 75.0
+
+    def test_build_mayotte_from_pop1b_ages_forward(self, tmp_path, monkeypatch):
+        """POP1B at 2017 must be aged forward to the requested census year."""
+        from passculture.data.insee_population import downloaders
+
+        pop1b = pd.DataFrame(
+            [
+                {"age": 10, "sex": "male", "population": 100.0},
+                {"age": 10, "sex": "female", "population": 120.0},
+                {"age": 11, "sex": "male", "population": 50.0},
+            ]
+        )
+        estimates = pd.DataFrame(
+            [
+                {
+                    "year": 2022,
+                    "department_code": "976",
+                    "sex": "male",
+                    "population": 150.0,
+                },
+                {
+                    "year": 2022,
+                    "department_code": "976",
+                    "sex": "female",
+                    "population": 120.0,
+                },
+            ]
+        )
+
+        monkeypatch.setattr(
+            downloaders, "download_mayotte_pop1b", lambda cache_dir=None: pop1b
+        )
+        monkeypatch.setattr(
+            downloaders, "download_estimates", lambda cache_dir=None: estimates
+        )
+
+        rows = downloaders._build_mayotte_from_pop1b(
+            year=2022, min_age=0, max_age=120, cache_dir=None
+        )
+        df = pd.DataFrame(rows)
+
+        # Ages must have advanced by 5 years
+        assert set(df["age"]) == {15, 16}
+        # Male total should be scaled to 150 (was 100 + 50 = 150 before scaling,
+        # so factor is 1.0 here)
+        male_total = df[df["sex"] == "male"]["population"].sum()
+        assert abs(male_total - 150.0) < 1e-6
+        # Female rows should be scaled to 120
+        female_total = df[df["sex"] == "female"]["population"].sum()
+        assert abs(female_total - 120.0) < 1e-6
+
+
+# -----------------------------------------------------------------------------
+# Test: Processor wiring for MNAI + Mayotte POP1B
+# -----------------------------------------------------------------------------
+
+
+class TestProcessorUsesMnai:
+    """Verify the processor prefers MNAI and exposes the toggle."""
+
+    def test_use_mnai_flag_default_true(self):
+        proc = PopulationProcessor(
+            year=2022,
+            start_year=2022,
+            end_year=2022,
+            cache_dir=None,
+        )
+        assert proc.use_mnai_birth_month is True
+
+    def test_use_mnai_flag_opt_out(self):
+        proc = PopulationProcessor(
+            year=2022,
+            start_year=2022,
+            end_year=2022,
+            use_mnai_birth_month=False,
+            cache_dir=None,
+        )
+        assert proc.use_mnai_birth_month is False
