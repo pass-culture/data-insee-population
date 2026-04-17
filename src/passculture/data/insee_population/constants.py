@@ -30,7 +30,35 @@ INDCVI_URLS = {
 # Department-level estimates, page 8721456, 1975-2026 (updated Jan 2026)
 POPULATION_ESTIMATES_URL = "https://www.insee.fr/fr/statistiques/fichier/8721456/estim-pop-dep-sexe-gca-1975-2026.xlsx"
 
-# Birth data URLs for monthly distribution
+# INDREG: individus localisés à la région, contains MNAI (month of birth).
+# Only big departments (>= MNAI_MIN_DEPT_POPULATION) have DEPT populated;
+# small departments are recoverable only at REGION level.
+INDREG_URLS = {
+    2022: {
+        "page_id": "8590183",
+        "france_parquet": (
+            "https://www.insee.fr/fr/statistiques/fichier/8590183/RP2022_indreg.parquet"
+        ),
+    },
+}
+
+# Population threshold used by INSEE to publish department-level figures in
+# INDREG. Below this, only the REGION is published; we fall back to a regional
+# month-of-birth distribution for those departments.
+MNAI_MIN_DEPT_POPULATION = 700_000
+
+# Mayotte 2017 census (POP1B: population by sex and age). Page 4199233.
+# INSEE publishes the full POP1B (+other tables) as a single zip archive.
+# We extract the POP1B xls and sum communes to get the Mayotte-wide pyramid.
+# Fallback to synthesis if unreachable.
+MAYOTTE_CENSUS_YEAR = 2017
+MAYOTTE_POP1B_URL = (
+    "https://www.insee.fr/fr/statistiques/fichier/4199233/"
+    "td_Mayotte_Population_2017.zip"
+)
+MAYOTTE_POP1B_MEMBER = "BTX_TD_POP1B_2017.xls"
+
+# Birth data URLs for monthly distribution (fallback when MNAI unavailable)
 BIRTH_DATA_URLS = {
     # N4D: naissances vivantes par mois et département (page 8582142)
     # Columns: REGDEP_DOMI_MERE (region+dept), MNAIS (01-12/AN), NBNAIS

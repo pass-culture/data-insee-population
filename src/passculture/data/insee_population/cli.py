@@ -57,6 +57,14 @@ def population(
         "--correct-student-mobility/--no-student-mobility",
         help="Adjust EPCI geo ratios for student commuting (MOBSCO)",
     ),
+    use_mnai_birth_month: bool = typer.Option(
+        True,
+        "--use-mnai/--no-mnai",
+        help=(
+            "Month-of-birth from INDREG MNAI (doc-faithful); "
+            "falls back to N4D birth counts if disabled or unavailable"
+        ),
+    ),
     cache_dir: str = typer.Option(
         "data/cache",
         help="Cache directory for downloads",
@@ -159,6 +167,7 @@ def population(
             include_mayotte=include_mayotte,
             correct_student_mobility=correct_student_mobility,
             monthly=monthly,
+            use_mnai_birth_month=use_mnai_birth_month,
             cache_dir=cache_dir,
         )
     except ValueError as e:

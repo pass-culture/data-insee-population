@@ -27,6 +27,7 @@ from passculture.data.insee_population.constants import (
 )
 from passculture.data.insee_population.downloaders import (
     download_indcvi,
+    download_mnai_birth_distribution,
     download_monthly_birth_distribution,
     synthesize_mayotte_population,
 )
@@ -81,6 +82,7 @@ class PopulationProcessor:
         include_mayotte: bool = True,
         correct_student_mobility: bool = True,
         monthly: bool = False,
+        use_mnai_birth_month: bool = True,
         cache_dir: str | Path | None = "data/cache",
     ) -> None:
         """Initialize processor with filtering options."""
@@ -94,6 +96,7 @@ class PopulationProcessor:
         self.include_mayotte = include_mayotte
         self.correct_student_mobility = correct_student_mobility
         self.monthly = monthly
+        self.use_mnai_birth_month = use_mnai_birth_month
         self.cache_dir = Path(cache_dir) if cache_dir else None
 
         # Validate forecast horizon: simple aging is valid as long as
@@ -171,9 +174,21 @@ class PopulationProcessor:
         sy, ey = self.start_year, self.end_year
         logger.info("Creating projected tables ({}-{}, simple aging)...", sy, ey)
 
-        # 1. Download and register monthly birth distribution
+        # 1. Download and register monthly birth distribution.
+        # Primary source: MNAI from INDREG (month of birth of the living
+        # population, with regional fallback for small departments and
+        # metropolitan fallback for Mayotte). Secondary: N4D (recent birth
+        # counts). Last resort: uniform 1/12.
         logger.info("Step 1: Loading monthly birth distribution...")
-        monthly_births_df = download_monthly_birth_distribution(self.cache_dir)
+        monthly_births_df = pd.DataFrame()
+        if self.use_mnai_birth_month:
+            logger.info("  Trying MNAI (INDREG) distribution...")
+            monthly_births_df = download_mnai_birth_distribution(
+                self.year, self.cache_dir
+            )
+        if monthly_births_df.empty:
+            logger.info("  Falling back to N4D birth counts...")
+            monthly_births_df = download_monthly_birth_distribution(self.cache_dir)
         if monthly_births_df.empty:
             logger.warning("  Birth data unavailable, using uniform 1/12 distribution")
             monthly_births_df = self._build_uniform_monthly_distribution()
