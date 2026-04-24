@@ -2,9 +2,9 @@
 
 Handles HTTP downloads and Excel parsing for:
 - Census INDCVI parquet files
-- Monthly birth distribution by department
+- INDREG (MNAI month-of-birth) parquet files
 - MOBSCO student commuting parquet
-- Mayotte synthesis (population estimates + quinquennal age pyramid)
+- Mayotte 2017 POP1B census
 """
 
 from __future__ import annotations
@@ -19,9 +19,6 @@ from loguru import logger
 from rich.progress import Progress
 
 from passculture.data.insee_population.constants import (
-    AGE_BUCKETS,
-    AGE_PYRAMID_URL,
-    BIRTH_DATA_URLS,
     DEPARTMENTS_METRO,
     INDCVI_URLS,
     INDREG_URLS,
@@ -31,7 +28,6 @@ from passculture.data.insee_population.constants import (
     MAYOTTE_POP1B_URL,
     MNAI_MIN_DEPT_POPULATION,
     MOBSCO_URL,
-    POPULATION_ESTIMATES_URL,
 )
 
 # HTTP timeouts
@@ -40,38 +36,29 @@ ESTIMATES_TIMEOUT = 120  # 2 minutes for smaller files
 CHUNK_SIZE = 131072  # 128KB chunks
 
 
+def _cached_parquet(url: str, filename: str, cache_dir: Path | None) -> Path:
+    """Return a local path to the parquet at ``url``, caching by filename."""
+    if cache_dir:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        parquet_path = cache_dir / filename
+        if parquet_path.exists():
+            logger.debug("Using cached: {}", parquet_path)
+            return parquet_path
+    else:
+        parquet_path = Path(tempfile.mkdtemp()) / filename
+
+    _download_file(url, parquet_path)
+    return parquet_path
+
+
 def download_indcvi(year: int, cache_dir: Path | None) -> Path:
-    """Download INDCVI census parquet file.
-
-    Args:
-        year: Census year
-        cache_dir: Directory for caching, None for temp file
-
-    Returns:
-        Path to local parquet file
-    """
+    """Download INDCVI census parquet file."""
     if year not in INDCVI_URLS:
         raise ValueError(
             f"Year {year} not available. Available: {list(INDCVI_URLS.keys())}"
         )
-
     url = INDCVI_URLS[year].get("france_parquet") or INDCVI_URLS[year]["france"]
-
-    if cache_dir:
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        parquet_path = cache_dir / f"indcvi_{year}.parquet"
-
-        if parquet_path.exists():
-            logger.debug("Using cached: {}", parquet_path)
-            return parquet_path
-
-        _download_file(url, parquet_path)
-        return parquet_path
-
-    tmpdir = tempfile.mkdtemp()
-    parquet_path = Path(tmpdir) / f"indcvi_{year}.parquet"
-    _download_file(url, parquet_path)
-    return parquet_path
+    return _cached_parquet(url, f"indcvi_{year}.parquet", cache_dir)
 
 
 def download_indreg(year: int, cache_dir: Path | None) -> Path:
@@ -86,220 +73,14 @@ def download_indreg(year: int, cache_dir: Path | None) -> Path:
             f"Year {year} not available for INDREG. "
             f"Available: {list(INDREG_URLS.keys())}"
         )
-
-    url = INDREG_URLS[year]["france_parquet"]
-
-    if cache_dir:
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        parquet_path = cache_dir / f"indreg_{year}.parquet"
-
-        if parquet_path.exists():
-            logger.debug("Using cached: {}", parquet_path)
-            return parquet_path
-
-        _download_file(url, parquet_path)
-        return parquet_path
-
-    tmpdir = tempfile.mkdtemp()
-    parquet_path = Path(tmpdir) / f"indreg_{year}.parquet"
-    _download_file(url, parquet_path)
-    return parquet_path
+    return _cached_parquet(
+        INDREG_URLS[year]["france_parquet"], f"indreg_{year}.parquet", cache_dir
+    )
 
 
 def download_mobsco(cache_dir: Path | None) -> Path:
-    """Download MOBSCO (student commuting) parquet file.
-
-    Args:
-        cache_dir: Directory for caching, None for temp file
-
-    Returns:
-        Path to local parquet file
-    """
-    if cache_dir:
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        parquet_path = cache_dir / "mobsco_2022.parquet"
-
-        if parquet_path.exists():
-            logger.debug("Using cached: {}", parquet_path)
-            return parquet_path
-
-        _download_file(MOBSCO_URL, parquet_path)
-        return parquet_path
-
-    tmpdir = tempfile.mkdtemp()
-    parquet_path = Path(tmpdir) / "mobsco_2022.parquet"
-    _download_file(MOBSCO_URL, parquet_path)
-    return parquet_path
-
-
-def download_estimates(
-    extrapolate_to: int | None = None,
-    cache_dir: Path | None = None,
-) -> pd.DataFrame:
-    """Download INSEE population estimates by department/sex/year.
-
-    Args:
-        extrapolate_to: If beyond available data, extrapolate using trends
-        cache_dir: Directory for caching the downloaded file
-
-    Returns:
-        DataFrame with columns: year, department_code, sex, population
-    """
-    cache_path = cache_dir / "population_estimates.parquet" if cache_dir else None
-    if cache_path and cache_path.exists():
-        logger.debug("Using cached estimates: {}", cache_path)
-        df = pd.read_parquet(cache_path)
-        if extrapolate_to and extrapolate_to > df["year"].max():
-            df = _extrapolate_last_year(
-                df, df["year"].max(), extrapolate_to, "estimates"
-            )
-        return df
-
-    try:
-        logger.info("Downloading estimates from {}", POPULATION_ESTIMATES_URL)
-        response = requests.get(POPULATION_ESTIMATES_URL, timeout=ESTIMATES_TIMEOUT)
-        response.raise_for_status()
-
-        xls = pd.ExcelFile(io.BytesIO(response.content))
-        results = []
-        max_available_year = 0
-
-        for sheet_name in xls.sheet_names:
-            if not sheet_name.isdigit():
-                continue
-
-            year = int(sheet_name)
-            max_available_year = max(max_available_year, year)
-            results.extend(_parse_estimates_sheet(xls, sheet_name, year))
-
-        if not results:
-            return pd.DataFrame()
-
-        df = pd.DataFrame(results)
-
-        if cache_path and cache_dir:
-            cache_dir.mkdir(parents=True, exist_ok=True)
-            df.to_parquet(cache_path, index=False)
-
-        if extrapolate_to and extrapolate_to > max_available_year:
-            df = _extrapolate_last_year(
-                df, max_available_year, extrapolate_to, "estimates"
-            )
-
-        return df
-
-    except Exception as e:
-        logger.warning("Could not download estimates: {}", e)
-        return pd.DataFrame()
-
-
-def download_quinquennal_estimates(
-    start_year: int,
-    end_year: int,
-    cache_dir: Path | None = None,
-) -> pd.DataFrame:
-    """Download population by department/sex/5-year age band for multiple years.
-
-    Used for Mayotte synthesis. Parses the AGE_PYRAMID_URL Excel file
-    (one sheet per year). For years beyond available data, repeats the
-    last available year.
-
-    Args:
-        start_year: First year to include
-        end_year: Last year to include
-        cache_dir: Directory for caching the downloaded file
-
-    Returns:
-        DataFrame with columns: year, department_code, sex, age_band, population
-    """
-    cache_path = cache_dir / "quinquennal_estimates.parquet" if cache_dir else None
-    if cache_path and cache_path.exists():
-        logger.debug("Using cached quinquennal estimates: {}", cache_path)
-        df = pd.read_parquet(cache_path)
-        if end_year > df["year"].max():
-            df = _extrapolate_last_year(df, df["year"].max(), end_year, "quinquennal")
-        return df[(df["year"] >= start_year) & (df["year"] <= end_year)]
-
-    logger.info("Downloading quinquennal age pyramid from {}", AGE_PYRAMID_URL)
-    response = requests.get(AGE_PYRAMID_URL, timeout=ESTIMATES_TIMEOUT)
-    response.raise_for_status()
-
-    xls = pd.ExcelFile(io.BytesIO(response.content))
-    results = []
-    max_available_year = 0
-
-    for sheet_name in xls.sheet_names:
-        if not sheet_name.isdigit():
-            continue
-        year = int(sheet_name)
-        max_available_year = max(max_available_year, year)
-        results.extend(_parse_quinquennal_sheet(xls, sheet_name, year))
-
-    if not results:
-        logger.warning("No quinquennal data parsed")
-        return pd.DataFrame()
-
-    df = pd.DataFrame(results)
-
-    if end_year > max_available_year:
-        df = _extrapolate_last_year(df, max_available_year, end_year, "quinquennal")
-
-    if cache_path and cache_dir:
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        df.to_parquet(cache_path, index=False)
-
-    return df[(df["year"] >= start_year) & (df["year"] <= end_year)]
-
-
-def download_monthly_birth_distribution(
-    cache_dir: Path | None = None,
-) -> pd.DataFrame:
-    """Download birth data by department and month, compute monthly ratios.
-
-    Downloads the INSEE file with births by month/department, averages across
-    available years, and computes each month's share of annual births per dept.
-
-    Args:
-        cache_dir: Directory for caching
-
-    Returns:
-        DataFrame with columns: department_code, month (1-12), month_ratio
-    """
-    cache_path = (
-        cache_dir / "monthly_birth_distribution_n4d.parquet" if cache_dir else None
-    )
-    if cache_path and cache_path.exists():
-        logger.debug("Using cached monthly birth distribution: {}", cache_path)
-        return pd.read_parquet(cache_path)
-
-    url = BIRTH_DATA_URLS.get("by_dept_month") or BIRTH_DATA_URLS.get("by_month_dept")
-    if not url:
-        logger.warning("No birth-by-month URL configured")
-        return pd.DataFrame()
-
-    try:
-        logger.info("Downloading birth data by month from {}", url)
-        response = requests.get(url, timeout=ESTIMATES_TIMEOUT)
-        response.raise_for_status()
-
-        if url.endswith(".csv"):
-            df = _parse_n4d_birth_csv(response.text)
-        else:
-            xls = pd.ExcelFile(io.BytesIO(response.content))
-            df = _parse_monthly_birth_excel(xls)
-
-        if df.empty:
-            return df
-
-        if cache_path and cache_dir:
-            cache_dir.mkdir(parents=True, exist_ok=True)
-            df.to_parquet(cache_path, index=False)
-
-        return df
-
-    except Exception as e:
-        logger.warning("Could not download monthly birth data: {}", e)
-        return pd.DataFrame()
+    """Download MOBSCO (student commuting) parquet file."""
+    return _cached_parquet(MOBSCO_URL, "mobsco_2022.parquet", cache_dir)
 
 
 # -----------------------------------------------------------------------------
@@ -653,276 +434,6 @@ def _download_file(url: str, dest: Path) -> None:
                 progress.advance(task, len(chunk))
 
 
-def _parse_estimates_sheet(xls: pd.ExcelFile, sheet_name: str, year: int) -> list[dict]:
-    """Parse a single year's estimates sheet."""
-    df = pd.read_excel(xls, sheet_name=sheet_name, skiprows=3, header=None)
-    results = []
-
-    for _, row in df.iterrows():
-        dept = str(row[0]).strip() if pd.notna(row[0]) else ""
-        if not dept or len(dept) > 3 or not dept[0].isdigit():
-            continue
-        if len(dept) == 1:
-            dept = f"0{dept}"
-
-        try:
-            # Columns: 0=dept, 1=name, Ensemble(2-7), Hommes(8-13), Femmes(14-19)
-            male_total = row[13] if pd.notna(row[13]) else 0
-            female_total = row[19] if pd.notna(row[19]) else 0
-
-            if male_total > 0:
-                results.append(
-                    {
-                        "year": year,
-                        "department_code": dept,
-                        "sex": "male",
-                        "population": float(male_total),
-                    }
-                )
-            if female_total > 0:
-                results.append(
-                    {
-                        "year": year,
-                        "department_code": dept,
-                        "sex": "female",
-                        "population": float(female_total),
-                    }
-                )
-        except (ValueError, TypeError, IndexError):
-            continue
-
-    return results
-
-
-def _extrapolate_last_year(
-    df: pd.DataFrame, last_year: int, target_year: int, label: str
-) -> pd.DataFrame:
-    """Repeat last year of data for years beyond available range.
-
-    Args:
-        df: DataFrame with a 'year' column
-        last_year: Last available year in the data
-        target_year: Year to extend to
-        label: Human-readable label for the print message (e.g. "estimates")
-    """
-    logger.info(
-        "Extending {} with last known year ({}) to {}...",
-        label,
-        last_year,
-        target_year,
-    )
-
-    last_year_data = df[df["year"] == last_year]
-    if last_year_data.empty:
-        return df
-
-    extended = []
-    for year in range(last_year + 1, target_year + 1):
-        year_copy = last_year_data.copy()
-        year_copy["year"] = year
-        extended.append(year_copy)
-
-    if extended:
-        return pd.concat([df, *extended], ignore_index=True)
-
-    return df
-
-
-# Age band column indices in the quinquennal Excel sheets
-# The sheet layout is: col0=dept, col1=name,
-#   Ensemble: cols 2..21 (20 age bands), col 22 (total)   = 21 cols
-#   Hommes:   cols 23..42 (20 age bands), col 43 (total)  = 21 cols
-#   Femmes:   cols 44..63 (20 age bands), col 64 (total)  = 21 cols
-# Age bands in order: 0-4, 5-9, 10-14, ... 90-94, 95+
-_QUINQUENNAL_AGE_BANDS = list(AGE_BUCKETS.keys())  # 20 bands
-_MALE_OFFSET = 23
-_FEMALE_OFFSET = 44
-
-
-def _parse_quinquennal_sheet(
-    xls: pd.ExcelFile, sheet_name: str, year: int
-) -> list[dict]:
-    """Parse a single year's quinquennal age pyramid sheet."""
-    df = pd.read_excel(xls, sheet_name=sheet_name, skiprows=3, header=None)
-    results = []
-
-    for _, row in df.iterrows():
-        dept = str(row[0]).strip() if pd.notna(row[0]) else ""
-        if not dept or len(dept) > 3 or not dept[0].isdigit():
-            continue
-        if len(dept) == 1:
-            dept = f"0{dept}"
-
-        try:
-            for band_idx, age_band in enumerate(_QUINQUENNAL_AGE_BANDS):
-                male_col = _MALE_OFFSET + band_idx
-                female_col = _FEMALE_OFFSET + band_idx
-                male_pop = float(row[male_col]) if pd.notna(row[male_col]) else 0
-                female_pop = float(row[female_col]) if pd.notna(row[female_col]) else 0
-
-                if male_pop > 0:
-                    results.append(
-                        {
-                            "year": year,
-                            "department_code": dept,
-                            "sex": "male",
-                            "age_band": age_band,
-                            "population": male_pop,
-                        }
-                    )
-                if female_pop > 0:
-                    results.append(
-                        {
-                            "year": year,
-                            "department_code": dept,
-                            "sex": "female",
-                            "age_band": age_band,
-                            "population": female_pop,
-                        }
-                    )
-        except (ValueError, TypeError, IndexError):
-            continue
-
-    return results
-
-
-# Month name mapping for the INSEE birth data Excel files
-_MONTH_NAMES = {
-    "janvier": 1,
-    "février": 2,
-    "mars": 3,
-    "avril": 4,
-    "mai": 5,
-    "juin": 6,
-    "juillet": 7,
-    "août": 8,
-    "septembre": 9,
-    "octobre": 10,
-    "novembre": 11,
-    "décembre": 12,
-}
-
-
-def _parse_n4d_birth_csv(content: str) -> pd.DataFrame:
-    """Parse INSEE N4D CSV (births by department and month) into monthly ratios.
-
-    Format: semicolon-separated with columns:
-    - REGDEP_DOMI_MERE: geographic code — two formats:
-        * 4-char "RRDD": region(2) + metro dept(2), e.g. "1175" → dept "75"
-        * 3-char "DDD": bare DOM dept code, e.g. "971", "972", "976"
-      Aggregate codes containing "X" ("11XX", "97XX", "FR", "FM"…) are skipped.
-    - MNAIS: "01"-"12" for months, "AN" for annual total (skipped)
-    - NBNAIS: number of births
-    """
-    df = pd.read_csv(io.StringIO(content), sep=";", dtype=str)
-
-    # Drop annual totals and aggregate codes (contain "X" or are national codes)
-    df = df[df["MNAIS"] != "AN"].copy()
-    df = df[~df["REGDEP_DOMI_MERE"].str.contains("X", na=True)]
-    df = df[~df["REGDEP_DOMI_MERE"].isin(["FR", "FM", "FR_ENR", "FM_ENR"])]
-
-    # Extract department code:
-    # - 3-char codes are bare DOM dept codes (971, 972, 973, 974, 976)
-    # - 4-char codes are region(2) + metro dept(2), strip the region prefix
-    def _extract_dept(regdep: str) -> str:
-        return regdep if len(regdep) == 3 else regdep[2:]
-
-    df["department_code"] = df["REGDEP_DOMI_MERE"].apply(_extract_dept)
-    df["month"] = pd.to_numeric(df["MNAIS"], errors="coerce")
-    df["births"] = pd.to_numeric(df["NBNAIS"], errors="coerce").fillna(0)
-    df = df[df["month"].notna() & (df["births"] > 0)]
-
-    result = df.groupby(["department_code", "month"])["births"].sum().reset_index()
-
-    totals = result.groupby("department_code")["births"].sum().reset_index()
-    totals.columns = ["department_code", "annual_births"]
-    result = result.merge(totals, on="department_code")
-    result["month_ratio"] = result["births"] / result["annual_births"]
-
-    n_depts = result["department_code"].nunique()
-    logger.debug("  Computed monthly ratios for {} departments (N4D CSV)", n_depts)
-    return result[["department_code", "month", "month_ratio"]].copy()
-
-
-def _parse_monthly_birth_excel(xls: pd.ExcelFile) -> pd.DataFrame:
-    """Parse birth-by-month-department Excel into monthly ratios.
-
-    The Excel file has multiple sheets (one per year), each with:
-    - First column: department code
-    - Month columns: Janvier, Février, ..., Décembre
-
-    We average across years, then compute each month's share per department.
-    """
-    all_data = []
-
-    for sheet_name in xls.sheet_names:
-        try:
-            df = pd.read_excel(xls, sheet_name=sheet_name, skiprows=3)
-        except Exception:
-            continue
-
-        df.columns = df.columns.astype(str).str.strip()
-        dept_col = df.columns[0]
-
-        # Find month columns by matching French month names
-        month_cols = {}
-        for col in df.columns:
-            col_lower = col.lower().strip()
-            for month_name, month_num in _MONTH_NAMES.items():
-                if col_lower.startswith(month_name):
-                    month_cols[col] = month_num
-                    break
-
-        if not month_cols:
-            continue
-
-        for _, row in df.iterrows():
-            dept = str(row[dept_col]).strip() if pd.notna(row[dept_col]) else ""
-            if (
-                not dept
-                or len(dept) > 3
-                or dept.lower() in ["total", "france", "métropole"]
-            ):
-                continue
-            if not dept[0].isdigit():
-                continue
-            if len(dept) == 1:
-                dept = f"0{dept}"
-
-            for col, month_num in month_cols.items():
-                try:
-                    births = row[col]
-                    if pd.notna(births):
-                        val = float(str(births).replace(" ", "").replace(",", "."))
-                        all_data.append(
-                            {
-                                "department_code": dept,
-                                "month": month_num,
-                                "births": val,
-                            }
-                        )
-                except (ValueError, TypeError):
-                    continue
-
-    if not all_data:
-        return pd.DataFrame()
-
-    df_births = pd.DataFrame(all_data)
-
-    # Average across years (multiple sheets), then compute monthly ratio per dept
-    avg = df_births.groupby(["department_code", "month"])["births"].mean().reset_index()
-    totals = avg.groupby("department_code")["births"].sum().reset_index()
-    totals.columns = ["department_code", "annual_births"]
-
-    avg = avg.merge(totals, on="department_code")
-    avg["month_ratio"] = avg["births"] / avg["annual_births"]
-
-    result = avg[["department_code", "month", "month_ratio"]].copy()
-    n_depts = result["department_code"].nunique()
-    logger.debug("  Computed monthly ratios for {} departments", n_depts)
-    return result
-
-
 # -----------------------------------------------------------------------------
 # Mayotte population synthesis
 # -----------------------------------------------------------------------------
@@ -930,228 +441,53 @@ def _parse_monthly_birth_excel(xls: pd.ExcelFile) -> pd.DataFrame:
 
 def synthesize_mayotte_population(
     year: int,
-    min_age: int,
-    max_age: int,
     cache_dir: Path | None = None,
-    prefer_pop1b: bool = True,
 ) -> pd.DataFrame:
-    """Build the Mayotte (976) population rows for a given census year.
+    """Build Mayotte (976) population rows for the given census year.
 
-    Primary method (``prefer_pop1b``): load the Mayotte 2017 POP1B census
-    (population by sex x age), age cohorts forward by ``year -
-    MAYOTTE_CENSUS_YEAR``, and scale the total to the department-level
-    estimate for ``year`` to keep totals consistent with INSEE. See
-    ``docs/design.md`` for the rationale.
-
-    Fallback (used when POP1B is unavailable): synthesise from the
-    department-level population estimate and a DOM quinquennal age
-    distribution.
+    Loads the Mayotte 2017 POP1B census (population by sex x age) and
+    ages it forward by ``year - MAYOTTE_CENSUS_YEAR``. Raw counts are
+    used as-is — this matches the INSEE spec doc convention of adding
+    Mayotte 2017 with ``age + 5`` for a 2022 reference.
     """
     logger.info("Adding Mayotte (976) for year {}...", year)
 
-    if prefer_pop1b:
-        rows = _build_mayotte_from_pop1b(year, min_age, max_age, cache_dir)
-        if rows:
-            df = pd.DataFrame(rows)
-            total = df["population"].sum()
-            logger.debug(
-                "  Added {} Mayotte rows from POP1B ({:,.0f} population)",
-                len(df),
-                total,
-            )
-            return df
-        logger.info("  POP1B unavailable, falling back to synthesis")
-
-    # Fallback: age distribution from DOM departments
-    dom_age_dist = _get_dom_age_distribution(year, cache_dir)
-    if not dom_age_dist:
-        logger.warning("  Could not compute DOM age distribution, skipping Mayotte")
-        return pd.DataFrame()
-
-    estimates_df = download_estimates(cache_dir=cache_dir)
-    mayotte_estimates = _get_mayotte_estimates(estimates_df, year)
-    if mayotte_estimates.empty:
-        logger.warning("  No Mayotte estimates found, skipping")
-        return pd.DataFrame()
-
-    data = _build_population_rows(
-        mayotte_estimates, dom_age_dist, year, min_age, max_age
-    )
-
-    if data:
-        df = pd.DataFrame(data)
-        total = df["population"].sum()
-        logger.debug(
-            "  Added {} Mayotte rows (synthesis) ({:,} population)",
-            len(data),
-            total,
-        )
-        return df
-
-    return pd.DataFrame()
-
-
-def _build_mayotte_from_pop1b(
-    year: int,
-    min_age: int,
-    max_age: int,
-    cache_dir: Path | None,
-) -> list[dict]:
-    """Age the Mayotte 2017 POP1B census forward to ``year`` and scale totals.
-
-    Cohorts are shifted by ``year - MAYOTTE_CENSUS_YEAR``. Ages above
-    ``MAX_AGE`` get dropped (old cohorts die out of the window). The result
-    is then rescaled per sex to match the department-level population
-    estimate for ``year``, so regional totals still anchor to INSEE.
-    """
     pop1b = download_mayotte_pop1b(cache_dir)
     if pop1b.empty:
-        return []
+        logger.warning("  Could not load Mayotte POP1B, skipping Mayotte")
+        return pd.DataFrame()
 
     offset = year - MAYOTTE_CENSUS_YEAR
     if offset < 0:
-        # Asked for a census year before the POP1B reference; we can't age
-        # backwards safely.
-        return []
+        logger.warning(
+            "  Asked for Mayotte {} before POP1B reference year {}; skipping",
+            year,
+            MAYOTTE_CENSUS_YEAR,
+        )
+        return pd.DataFrame()
 
     aged = pop1b.copy()
     aged["age"] = aged["age"] + offset
-    aged = aged[(aged["age"] >= min_age) & (aged["age"] <= max_age)]
+    aged = aged[aged["population"] > 0]
     if aged.empty:
-        return []
+        return pd.DataFrame()
 
-    scaling = _mayotte_scaling_factors(aged, year, cache_dir)
-    rows: list[dict] = []
-    for _, r in aged.iterrows():
-        pop = float(r["population"]) * scaling.get(r["sex"], 1.0)
-        if pop <= 0:
-            continue
-        rows.append(
-            {
-                "year": year,
-                "department_code": "976",
-                "region_code": "06",
-                "canton_code": "9799",
-                "commune_code": "",
-                "iris_code": IRIS_SENTINEL_NO_GEO,
-                "age": int(r["age"]),
-                "sex": r["sex"],
-                "population": pop,
-            }
-        )
-    return rows
-
-
-def _mayotte_scaling_factors(
-    aged: pd.DataFrame,
-    year: int,
-    cache_dir: Path | None,
-) -> dict[str, float]:
-    """Per-sex factor that rescales aged POP1B to the dept-level estimate.
-
-    Leaves factor = 1.0 when no estimate is available (keep raw POP1B).
-    """
-    estimates_df = download_estimates(cache_dir=cache_dir)
-    mayotte_estimates = _get_mayotte_estimates(estimates_df, year)
-    if mayotte_estimates.empty:
-        return {}
-
-    aged_totals = aged.groupby("sex")["population"].sum()
-    factors: dict[str, float] = {}
-    for _, r in mayotte_estimates.iterrows():
-        sex = r["sex"]
-        target = float(r["population"])
-        observed = float(aged_totals.get(sex, 0.0))
-        if observed > 0 and target > 0:
-            factors[sex] = target / observed
-    return factors
-
-
-def _get_dom_age_distribution(
-    year: int, cache_dir: Path | None = None
-) -> dict[int, float]:
-    """Get age distribution for Mayotte population synthesis.
-
-    Uses Mayotte's own quinquennal estimates (available from 2014).
-    Returns empty dict when Mayotte data is not available.
-
-    Uses quinquennal estimates (20 five-year bands) and distributes
-    uniformly within each band using AGE_BUCKETS.
-
-    Returns:
-        Dict mapping age -> percentage of total population
-    """
-    df = download_quinquennal_estimates(year, year, cache_dir)
-    if df.empty:
-        return {}
-
-    source = df[df["department_code"] == "976"]
-    if source.empty:
-        logger.warning("  No quinquennal data for Mayotte (976) -- skipping")
-        return {}
-
-    # Sum population across sexes per age band
-    band_totals = source.groupby("age_band")["population"].sum()
-
-    # Distribute uniformly within each band
-    age_totals: dict[int, float] = {}
-    for band_name, ages in AGE_BUCKETS.items():
-        band_pop = band_totals.get(band_name, 0)
-        per_year = band_pop / len(ages)
-        for age in ages:
-            age_totals[age] = age_totals.get(age, 0) + per_year
-
-    total = sum(age_totals.values())
-    if total == 0:
-        return {}
-
-    return {age: count / total for age, count in age_totals.items()}
-
-
-def _get_mayotte_estimates(estimates_df: pd.DataFrame, year: int) -> pd.DataFrame:
-    """Get Mayotte population estimates, using closest year if needed."""
-    mayotte = estimates_df[
-        (estimates_df["department_code"] == "976") & (estimates_df["year"] == year)
+    rows: list[dict] = [
+        {
+            "year": year,
+            "department_code": "976",
+            "region_code": "06",
+            "canton_code": "9799",
+            "commune_code": "",
+            "iris_code": IRIS_SENTINEL_NO_GEO,
+            "age": int(r["age"]),
+            "sex": r["sex"],
+            "population": float(r["population"]),
+        }
+        for _, r in aged.iterrows()
     ]
-
-    if mayotte.empty:
-        mayotte = estimates_df[estimates_df["department_code"] == "976"]
-        if not mayotte.empty:
-            closest_year = mayotte["year"].max()
-            mayotte = mayotte[mayotte["year"] == closest_year]
-            logger.debug("  Using estimates from {} for Mayotte", closest_year)
-
-    return mayotte
-
-
-def _build_population_rows(
-    estimates: pd.DataFrame,
-    age_dist: dict[int, float],
-    year: int,
-    min_age: int,
-    max_age: int,
-) -> list[dict]:
-    """Build Mayotte population rows from estimates and age distribution."""
-    data = []
-    for _, row in estimates.iterrows():
-        sex = row["sex"]
-        total_pop = row["population"]
-
-        for age in range(min_age, max_age + 1):
-            age_pct = age_dist.get(age, 0)
-            pop = total_pop * age_pct
-            if pop > 0:
-                data.append(
-                    {
-                        "year": year,
-                        "department_code": "976",
-                        "region_code": "06",
-                        "canton_code": "9799",  # Mayotte single canton
-                        "commune_code": "",
-                        "iris_code": IRIS_SENTINEL_NO_GEO,
-                        "age": age,
-                        "sex": sex,
-                        "population": pop,
-                    }
-                )
-    return data
+    df = pd.DataFrame(rows)
+    logger.debug(
+        "  Added {} Mayotte rows ({:,.0f} population)", len(df), df["population"].sum()
+    )
+    return df

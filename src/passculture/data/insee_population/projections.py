@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from loguru import logger
 
@@ -36,6 +36,8 @@ from passculture.data.insee_population.constants import (
 
 if TYPE_CHECKING:
     import duckdb
+
+ProjectionMethod = Literal["cohort-stable", "cohort-aging"]
 
 
 def _build_age_band_cases() -> str:
@@ -114,12 +116,18 @@ def project_multi_year(
     end_year: int | None = None,
     census_year: int = 2022,
     monthly: bool = False,
+    method: ProjectionMethod = "cohort-stable",
 ) -> None:
     """Project multi-year population at all geographic levels.
 
-    Uses simple census aging: population at age A in year Y equals the
-    census population at age A-(Y-census_year), with no mortality or
-    migration adjustment.
+    Two dept-level methods (see ``sql/projections.py`` docstring for the
+    algebra):
+
+    * ``cohort-stable`` (default, from the INSEE spec doc): national
+      cohort totals times age-specific dept shares frozen at census.
+      Renews the age-specific distribution each year, implicitly
+      capturing post-bac migration.
+    * ``cohort-aging`` (legacy): ages each census cohort in place.
 
     Default mode (yearly): one snapshot at January 1st per year, exploded
     into 12 birth-month sub-rows per cohort.
@@ -128,7 +136,7 @@ def project_multi_year(
 
     Requires these tables to already exist in the connection:
     - `population`: from download_and_process (INDCVI census)
-    - `monthly_births`: from download_monthly_birth_distribution
+    - `monthly_births`: from download_mnai_birth_distribution
     - `geo_ratios_epci`: from compute_geo_ratios('epci')
     - `geo_ratios_canton`: from compute_geo_ratios('canton')
     - `geo_ratios_iris`: from compute_geo_ratios('iris')
@@ -140,7 +148,11 @@ def project_multi_year(
         end_year = census_year
 
     mode_label = "monthly" if monthly else "yearly"
-    logger.info("Projecting multi-year population ({})...", mode_label)
+    logger.info(
+        "Projecting multi-year population ({}, method={})...",
+        mode_label,
+        method,
+    )
 
     age_band_cases = _build_age_band_cases()
     ci_params = {
@@ -151,13 +163,16 @@ def project_multi_year(
     }
 
     # Monthly vs yearly mode controls how snapshot months are generated.
+    # Join alias depends on method: cohort-aging uses `c` (census_dept),
+    # cohort-stable uses `ds` (dept_age_sex_shares).
+    dept_alias = "c" if method == "cohort-aging" else "ds"
     if monthly:
         month_params = {
             "month_select": "mb.month",
             "month_factor": "",
             "month_join": (
                 "JOIN monthly_births mb\n"
-                "        ON c.department_code = mb.department_code"
+                f"        ON {dept_alias}.department_code = mb.department_code"
             ),
         }
     else:
@@ -176,11 +191,20 @@ def project_multi_year(
         logger.debug("{} done ({:.1f}s)", label, elapsed)
         return result
 
-    # Department level (simple census aging)
+    if method == "cohort-stable":
+        dept_template = sql.CREATE_PROJECTED_DEPARTMENT_COHORT_STABLE
+    elif method == "cohort-aging":
+        dept_template = sql.CREATE_PROJECTED_DEPARTMENT
+    else:
+        raise ValueError(
+            f"Unknown projection method: {method!r}. "
+            "Expected 'cohort-stable' or 'cohort-aging'."
+        )
+
     _timed(
-        "Department projection",
+        f"Department projection ({method})",
         lambda: conn.execute(
-            sql.CREATE_PROJECTED_DEPARTMENT.format(
+            dept_template.format(
                 min_age=min_age,
                 max_age=max_age,
                 start_year=start_year,

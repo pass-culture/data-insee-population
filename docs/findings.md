@@ -3,13 +3,24 @@
 > Running log of validation results. Re-run the scripts in `validation/`
 > after regenerating the pipeline output to refresh these numbers.
 >
-> Last run: **2026-04-17** — full re-run after the MNAI + POP1B pass.
-> Pipeline: ages 15-24, projection 2019-2026, `use_mnai_birth_month=True`,
-> POP1B active.
+> Last run: **2026-04-23 (c)** — re-run after aligning the base table
+> with the INSEE spec doc: `age = year − ANAI` (birth-year age) and
+> raw Mayotte 2017 POP1B (no rescale). Pipeline:
+> `--method cohort-stable`, ages 15-24, 2019-2026,
+> `use_mnai_birth_month=True`, MOBSCO on for EPCI/IRIS.
 >
-> Scripts: `validation/compare_dept_growth.py`,
->          `validation/compare_regional.py`, `validation/compare_epci.py`,
->          `validation/compare_sise.py`, `validation/compare_iris.py`
+> Prior runs:
+> - **2026-04-23 (b)** — first `cohort-stable` run, still with AGEREV
+>   age and rescaled Mayotte.
+> - **2026-04-17 (a)** — legacy `cohort-aging`, with AGEREV age and
+>   rescaled Mayotte.
+>
+> 2022 numbers between (b) and the latest (c) shift slightly because
+> of the AGEREV→ANAI age redefinition; (a) and (b) agree at 2022
+> (methods, not inputs).
+>
+> Scripts: `validation/compare_regional.py`, `validation/compare_epci.py`,
+>          `validation/compare_sise.py`, `validation/compare_iris.py`.
 >
 > Pipeline reference: [`method.md`](./method.md). Design rationale and
 > limits: [`design.md`](./design.md).
@@ -21,16 +32,17 @@
 **What is reliable**
 
 - Department-level population at individual ages is **exact** at census year — taken directly from INDCVI, no redistribution.
-- Projection years use simple cohort aging (no mortality/migration); empirical drift ≤ 1.8% across 2019-2026.
+- Under `cohort-stable` (default, ANAI age), drift vs INSEE metro total is **+0% to +2.6%** across 2019-2026; the ~+1.7% at the anchor year reflects the birth-year age vs AGEREV definitional offset (not model error). Run-comparable against INSEE requires either an AGEREV conversion or switching the base table back to AGEREV.
 - EPCI coverage is **100%** (625 EPCIs); EPCI totals aggregate exactly to department totals.
 - MOBSCO student correction goes in the right direction: university EPCIs **+3 to +8pp** on 20-24 share; IDF suburbs down to **−8.7pp**.
+- Docx invariants under `cohort-stable`: national cohort total by `(birth_year, sex)` and age-specific dept share are **perfectly stable across projection years** (0.0000pp spread, see Finding 0b).
 
 **What is approximate**
 
 - EPCI and IRIS geographic distributions are **frozen** at 2022 census ratios. Confidence degrades ~1%/year beyond census.
 - MOBSCO correction magnitude: direction confirmed, **±2pp** uncertainty on the correction amount.
 - IRIS-level totals: reliable at dept level (100% pop coverage); **do not aggregate IRIS to derive EPCI totals for IDF suburbs** — structural 15-21% gap for ~20 EPCIs.
-- Simple aging ignores mortality and migration (**~0.2%** impact over 4 years for ages 15-24).
+- Neither method models mortality or migration (**~0.2%** impact over 4 years for ages 15-24).
 
 **Hard limits**
 
@@ -40,102 +52,102 @@
 
 ---
 
-## Dispersion of department growth — justifies the dept-level anchor (2026-04-17)
+## Docx method invariants (2026-04-23 c)
 
-### Finding 0: Department growth rates diverge enough from the national trend to reject a single national growth rate.
+### Finding 0b: `cohort-stable` reproduces the INSEE spec doc — exactly
 
-A plausible alternative to the dept-level anchor would be a single national
-growth rate per year-of-birth cohort, assuming population evolves uniformly
-across departments and sexes. Running `validation/compare_dept_growth.py` over
-the 2017→2022 window quantifies how wrong that assumption would be.
+The source document
+"Deps_Calcul de la population par sexe age dep annee.docx" asserts
+two invariants and gives two numeric examples. `cohort-stable` with
+ANAI-based age and raw Mayotte 2017 POP1B passes all four checks.
 
-Absolute deviation `|dept growth − national growth|` per 5-year age band, pooled over
-~100 departments × 2 sexes (values in **percentage points**):
+**Invariants** (spread of the quantity across projection years):
 
-| Age band | p50 | p90 | p99 |
-|---|---|---|---|
-| 0-4 | 2.5 | 6.0 | 19 |
-| 5-9 | 2.7 | 6.3 | 14 |
-| 10-14 | 2.5 | 7.6 | 17 |
-| **15-19** | **2.8** | **7.2** | **14** |
-| **20-24** | **2.8** | **6.8** | **12** |
-| 25-29 | 3.2 | 8.5 | 15 |
-| 30-34 | 2.7 | 6.9 | 12 |
-| 35-39 | 2.1 | 5.3 | 9 |
-| 40-44 | 3.5 | 8.6 | 21 |
-| 45-49 | 3.5 | 7.8 | 18 |
-| 50-54 | 2.2 | 6.6 | 12 |
-| 55-59 | 3.7 | 7.6 | 15 |
-| 60-64 | 3.4 | 6.9 | 16 |
-| 65-69 | 2.2 | 6.8 | 32 |
-| 70-74 | 5.4 | 12.6 | 18 |
-| 75-79 | 4.4 | 11.5 | 22 |
-| 80-84 | 4.6 | 10.3 | 29 |
-| 85+ | 4-10 | 7-29 | 22-52 |
+| Invariant | `cohort-stable` spread 2019-2026 | `cohort-aging` spread |
+|---|---|---|
+| 1. National cohort total for (birth_year=2005, male) | **0.0000%** | 0.0000% |
+| 2. Share of 15-yo males living in dept 01 | **0.0000pp** | 0.3295pp |
 
-**Top 5 divergent departments (mean deviation across bands, %)**
+**Docx-cited numeric examples** (reproduced exactly):
 
-| Department | Mean deviation |
-|---|---|
-| 976 (Mayotte) | 17.7 |
-| 973 (Guyane) | 13.1 |
-| 972 (Martinique) | 10.9 |
-| 971 (Guadeloupe) | 10.8 |
-| 974 (La Réunion) | 10.5 |
+| Docx claim | Our output | Match |
+|---|---|---|
+| 434,909 men born in 2005 in RP 2022 | 434,908 | ✓ (round-trip of 434,908.15) |
+| 1.09% of 15-yo males live in dept 01 | 1.0939% | ✓ |
 
-**Conclusion**: p90 deviation exceeds 2pp for every band; the top 5 divergent
-departments are all DOM. A single national growth rate would understate regional
-variation, particularly for DOM — this is why the code anchors to dept-level
-annual estimates (`AGE_PYRAMID_URL`) rather than applying the doc's step 2b.
+Critical prerequisites for docx compatibility:
+1. `age = year − ANAI` (birth-year age, not `AGEREV`).
+2. Mayotte 2017 POP1B added with `age + 5`, no rescaling.
+3. `--method cohort-stable` (default).
+
+Invariant 1 is shared by both methods (national cohort totals are
+preserved by construction). Invariant 2 is the defining property of
+`cohort-stable`: the age-specific geographic distribution is frozen
+at the census pattern. Under `cohort-aging` the share fluctuates
+0.81%-1.14% across years because different birth cohorts have
+different geographic distributions.
 
 ## Regional level (department → region aggregation)
 
-### Finding 1: Census year totals are near-exact; small residual from MNAI + POP1B
+### Finding 1: Census year totals vs INSEE regional pyramid
 
-Re-run 2026-04-17, year 2022, ages 15-24 — dept aggregated to region vs INSEE
-interactive regional pyramid (`donnees_pyramide_act.csv`):
+Re-run 2026-04-23 (c), year 2022, ages 15-24 — our dept totals aggregated
+to region vs INSEE interactive regional pyramid (`donnees_pyramide_act.csv`):
 
 | Region | INSEE | Ours | Diff |
 |---|---|---|---|
-| Île-de-France | 1,612,053 | 1,609,809 | −0.14% |
-| Grand Est | 653,281 | 657,685 | +0.67% |
-| Hauts-de-France | 763,734 | 766,078 | +0.31% |
-| Nouvelle-Aquitaine | 666,267 | 666,463 | +0.03% |
-| Auvergne-Rhône-Alpes | 969,841 | 975,481 | +0.58% |
-| PACA | 559,852 | 555,790 | −0.73% |
-| Bretagne | 393,633 | 394,985 | +0.34% |
-| Corse | 33,398 | 32,475 | −2.76% |
-| Normandie | 388,766 | 386,704 | −0.53% |
-| Pays de la Loire | 466,915 | 463,527 | −0.73% |
-| Occitanie | 699,082 | 702,797 | +0.53% |
-| Centre-Val de Loire | 287,868 | 285,669 | −0.76% |
-| Bourgogne-Franche-Comté | 313,646 | 312,624 | −0.33% |
+| Île-de-France | 1,612,053 | 1,604,789 | −0.45% |
+| Centre-Val de Loire | 287,868 | 295,773 | +2.75% |
+| Bourgogne-Franche-Comté | 313,646 | 322,488 | +2.82% |
+| Normandie | 388,766 | 397,892 | +2.35% |
+| Hauts-de-France | 763,734 | 780,188 | +2.15% |
+| Grand Est | 653,281 | 664,624 | +1.74% |
+| Pays de la Loire | 466,915 | 479,537 | +2.70% |
+| Bretagne | 393,633 | 406,547 | +3.28% |
+| Nouvelle-Aquitaine | 666,267 | 683,275 | +2.55% |
+| Occitanie | 699,082 | 716,062 | +2.43% |
+| Auvergne-Rhône-Alpes | 969,841 | 993,422 | +2.43% |
+| PACA | 559,852 | 563,638 | +0.68% |
+| Corse | 33,398 | 33,035 | −1.09% |
 
-All metro regions within ±1% (Corse −2.8% is the outlier — small denominator
-amplifies small absolute gaps). Region totals used to match INSEE exactly by
-construction when we anchored to quinquennal; now that the pipeline uses
-dept-level simple aging, a small residual appears.
+Run (c) shifts most regions ~2pp higher than run (b) because our
+output now counts people by **birth-year age** (`age = year − ANAI`)
+while INSEE's regional pyramid is by **AGEREV** (age at last birthday
+at Jan 1st of the year). "15-24 by birth year" includes an extra
+half-year of cohorts compared to "AGEREV 15-24", hence the
+systematic positive bias. This was the price of reproducing the
+INSEE spec doc / xlsx exactly; under run (b) the same check gave
+±1% for every metro region.
 
-Sex ratio differs by ≤ 0.022 everywhere (Corse +0.022 is the largest).
+The shift is definitional, not random. For comparisons to INSEE's
+AGEREV-based series, apply an AGEREV conversion or switch the base
+table back to AGEREV (not currently a CLI option).
 
-### Finding 2: Year-over-year drift reflects simple aging (no mortality/migration)
+### Finding 2: Year-over-year drift vs INSEE metro estimates
 
-Metro total 15-24 vs INSEE estimate:
+Metro total 15-24 vs INSEE estimate, under each run:
 
-| Year | INSEE | Ours | Drift |
-|---|---|---|---|
-| 2019 | 7,655,791 | 7,543,879 | −1.46% |
-| 2020 | 7,688,057 | 7,632,171 | −0.73% |
-| 2021 | 7,731,977 | 7,719,947 | −0.16% |
-| 2022 | 7,808,336 | 7,810,089 | +0.02% |
-| 2023 | 7,860,061 | 7,889,888 | +0.38% |
-| 2024 | 7,897,953 | 7,962,918 | +0.82% |
-| 2025 | 7,929,069 | 8,028,890 | +1.26% |
-| 2026 | 7,943,494 | 8,083,258 | +1.76% |
+| Year | INSEE | (c) cohort-stable + ANAI (2026-04-23) | drift | (a) cohort-aging + AGEREV (2026-04-17) | drift |
+|---|---|---|---|---|---|
+| 2019 | 7,655,791 | 7,653,854 | −0.03% | 7,543,879 | −1.46% |
+| 2020 | 7,688,057 | 7,744,541 | +0.73% | 7,632,171 | −0.73% |
+| 2021 | 7,731,977 | 7,847,401 | +1.49% | 7,719,947 | −0.16% |
+| 2022 | 7,808,336 | 7,941,269 | +1.70% | 7,810,089 | +0.02% |
+| 2023 | 7,860,061 | 8,027,080 | +2.12% | 7,889,888 | +0.38% |
+| 2024 | 7,897,953 | 8,102,379 | +2.59% | 7,962,918 | +0.82% |
+| 2025 | 7,929,069 | 8,133,612 | +2.58% | 8,028,890 | +1.26% |
+| 2026 | 7,943,494 | 8,140,970 | +2.49% | 8,083,258 | +1.76% |
 
-The ±1.5% year-away pattern is consistent with ~0.2-0.3%/year bias from the
-no-mortality, no-migration assumption. The 2022 near-zero drift is the
-expected "anchor year" signature.
+The +1.7% systematic gap at the anchor year 2022 under run (c) is
+the AGEREV-vs-ANAI definitional shift described in Finding 1 — our
+15-24 by birth-year age includes roughly half a year of extra cohorts
+compared to INSEE's AGEREV 15-24. The slope (~0.5pp per year from
+2022) reflects the no-mortality, no-migration assumption shared by
+both methods.
+
+For drift analysis that's cleanly comparable to INSEE, use run (a)
+or switch the base table back to AGEREV; for docx-compliant modelling,
+use run (c) and accept the definitional offset.
 
 ### Finding 2b: Lycée band (15-17) flagged for MOBSCO leakage in 8 regions
 
@@ -388,24 +400,37 @@ the census within ~6%. For university cities, MOBSCO effect dominates the diff.
 
 ## Multi-year drift analysis (Feb 2026)
 
-### Finding 12: University EPCI shares drift 1.4–2.7pp over 2015–2030; freeze after 2026
+### Finding 12: University EPCI share drift — `cohort-stable` is much flatter than `cohort-aging`
 
-| EPCI | Share 2015 | Share 2026 | Share 2030 | Drift (2015–2026) |
-|------|------------|------------|------------|-------------------|
-| Montpellier | 56.8% | 54.6% | 54.6% | +2.71pp |
-| Toulouse | 56.3% | 54.6% | 54.6% | +2.68pp |
-| Rennes | 53.9% | 52.2% | 52.2% | +2.58pp |
-| Métropole Grand Paris | 54.6% | 53.7% | 53.7% | +2.45pp |
-| Grenoble | 52.1% | 49.8% | 49.8% | +2.24pp |
-| Brest | 50.7% | 51.0% | 51.0% | +2.17pp |
-| Lyon | 54.1% | 52.8% | 52.8% | +2.15pp |
-| Strasbourg | 53.2% | 51.3% | 51.3% | +2.05pp |
-| Bordeaux | 53.3% | 52.0% | 52.0% | +1.36pp |
+2019→2026 drift of 20-24 share (within 15-24) for the top university
+EPCIs, under each method (re-run 2026-04-23):
 
-**Year-over-year variation**: with simple aging, different birth cohorts enter/exit
-the 15–24 range each year. The 20-24 share varies because census cohort sizes differ
-(reflecting historical birth rate variations). This is expected demographic structure,
-not an error. Geographic ratios are fixed at 2022 census values.
+| EPCI | cohort-stable | cohort-aging |
+|---|---|---|
+| Toulouse Métropole | +1.44pp | +9.56pp |
+| Métropole de Lyon | +1.46pp | +8.48pp |
+| Montpellier Méd. Métr. | +1.44pp | +8.21pp |
+| Métropole Grand Paris | +1.43pp | +3.56pp |
+| Rennes Métropole | +1.48pp | +6.29pp |
+| Bordeaux Métropole | +1.49pp | +6.09pp |
+| Strasbourg Eurométr. | +1.47pp | +5.90pp |
+| Brest Métropole | +1.53pp | +4.51pp |
+| Grenoble-Alpes-Métr. | +1.53pp | +3.19pp |
+| Aix-Marseille-Prov. | +1.50pp | +2.36pp |
+| Nantes Métropole | +1.51pp | +1.66pp |
+
+**Interpretation.** Under `cohort-aging`, each projection year takes
+a *different* birth cohort's dept share (aged in place), so the 20-24
+window's composition and its geographic distribution both shift year
+over year. Under `cohort-stable` the age-specific dept share is
+pinned to the census pattern, so share drift only reflects changing
+cohort sizes — a much tighter ~1.5pp envelope.
+
+The prior finding table (2015–2030 horizon, 1.4–2.7pp drift under
+cohort-aging) remains valid for that method and horizon; `cohort-stable`
+produces roughly equivalent magnitude but for a different reason (no
+share flip between entering/exiting cohorts), and shares still freeze
+after `census_year + min_age`.
 
 ---
 
@@ -428,9 +453,12 @@ All other EPCIs show < 1% gap post-fix.
 ## How to re-run
 
 ```bash
-# Dept vs national growth dispersion (no pipeline output needed)
-uv run python validation/compare_dept_growth.py \
-  --start-year 2017 --end-year 2022
+# 1. Regenerate pipeline output (defaults: cohort-stable, 2019-2027)
+uv run insee-population population --min-age 15 --max-age 24
+
+# Or use the legacy method for comparison
+uv run insee-population population --method cohort-aging \
+  --min-age 15 --max-age 24 -o data/output/cohort-aging
 
 # Regional comparison
 uv run python validation/compare_regional.py \

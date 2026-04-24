@@ -8,7 +8,6 @@ import pandas as pd
 import pytest
 
 from passculture.data.insee_population.constants import (
-    POPULATION_SCHEMA,
     POPULATION_SCHEMA_CANTON,
     POPULATION_SCHEMA_DEPARTMENT,
     POPULATION_SCHEMA_EPCI,
@@ -146,10 +145,6 @@ class TestSchemaMatchesSQLOutput:
         df = projection_processor.to_pandas("iris")
         schema_cols = [c["name"] for c in POPULATION_SCHEMA_IRIS]
         assert list(df.columns) == schema_cols
-
-    def test_backward_compat_alias(self):
-        """POPULATION_SCHEMA is an alias for POPULATION_SCHEMA_IRIS."""
-        assert POPULATION_SCHEMA is POPULATION_SCHEMA_IRIS
 
 
 class TestSchemaStructure:
