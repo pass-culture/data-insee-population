@@ -35,7 +35,7 @@
 - Under `cohort-stable` (default, ANAI age), drift vs INSEE metro total is **+0% to +2.6%** across 2019-2026; the ~+1.7% at the anchor year reflects the birth-year age vs AGEREV definitional offset (not model error). Run-comparable against INSEE requires either an AGEREV conversion or switching the base table back to AGEREV.
 - EPCI coverage is **100%** (625 EPCIs); EPCI totals aggregate exactly to department totals.
 - MOBSCO student correction goes in the right direction: university EPCIs **+3 to +8pp** on 20-24 share; IDF suburbs down to **−8.7pp**.
-- Docx invariants under `cohort-stable`: national cohort total by `(birth_year, sex)` and age-specific dept share are **perfectly stable across projection years** (0.0000pp spread, see Finding 0b).
+- Under `cohort-stable`: national cohort totals by `(birth_year, sex)` and age-specific dept shares are stable across projection years by construction.
 
 **What is approximate**
 
@@ -52,40 +52,18 @@
 
 ---
 
-## Docx method invariants (2026-04-23 c)
+## Method fidelity
 
-### Finding 0b: `cohort-stable` reproduces the INSEE spec doc — exactly
-
-The source document
-"Deps_Calcul de la population par sexe age dep annee.docx" asserts
-two invariants and gives two numeric examples. `cohort-stable` with
-ANAI-based age and raw Mayotte 2017 POP1B passes all four checks.
-
-**Invariants** (spread of the quantity across projection years):
-
-| Invariant | `cohort-stable` spread 2019-2026 | `cohort-aging` spread |
-|---|---|---|
-| 1. National cohort total for (birth_year=2005, male) | **0.0000%** | 0.0000% |
-| 2. Share of 15-yo males living in dept 01 | **0.0000pp** | 0.3295pp |
-
-**Docx-cited numeric examples** (reproduced exactly):
-
-| Docx claim | Our output | Match |
-|---|---|---|
-| 434,909 men born in 2005 in RP 2022 | 434,908 | ✓ (round-trip of 434,908.15) |
-| 1.09% of 15-yo males live in dept 01 | 1.0939% | ✓ |
-
-Critical prerequisites for docx compatibility:
-1. `age = year − ANAI` (birth-year age, not `AGEREV`).
-2. Mayotte 2017 POP1B added with `age + 5`, no rescaling.
-3. `--method cohort-stable` (default).
-
-Invariant 1 is shared by both methods (national cohort totals are
-preserved by construction). Invariant 2 is the defining property of
-`cohort-stable`: the age-specific geographic distribution is frozen
-at the census pattern. Under `cohort-aging` the share fluctuates
-0.81%-1.14% across years because different birth cohorts have
-different geographic distributions.
+Under `cohort-stable` the pipeline is a faithful implementation of the
+INSEE spec doc: national cohort totals by `(birth_year, sex)` are
+preserved across projection years by construction, and the dept share
+for any `(sex, age)` is frozen at the census pattern. Under
+`cohort-aging` the cohort total is preserved but the dept share
+drifts with the entering cohort — which is the defining difference
+between the two methods. Prerequisites for the docx match are the
+base-table choices documented in [`design.md`](./design.md):
+`age = year − ANAI`, raw Mayotte 2017 POP1B with `age + 5`, MNAI
+month-of-birth, MOBSCO on at EPCI/IRIS.
 
 ## Regional level (department → region aggregation)
 
