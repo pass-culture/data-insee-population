@@ -21,32 +21,6 @@ the simple aging assumption (no mortality/migration). All other
 uncertainty is in how population is distributed across months and
 sub-geographies.
 
-## Age convention: birth-year age (ANAI), not AGEREV
-
-Ages in the base table are computed as `age = year − ANAI` (year
-minus *année de naissance*). A 17-year-old in 2022 is therefore
-anyone born in 2005, regardless of whether their 17th birthday had
-passed by the census date.
-
-The alternative is `AGEREV` (age at last birthday at census date),
-which INSEE publishes in several aggregated tables (regional pyramids,
-dept-level estimates). We use birth-year age because:
-
-- The INSEE spec doc
-  ("Deps_Calcul de la population par sexe age dep annee.docx")
-  uses birth-year age throughout (`age = annee − annee_naissance`).
-  Using AGEREV would diverge from the spec at boundaries.
-- Birth-year age matches natural usage ("people who turn 18 in 2026").
-- With this convention, our `cohort-stable` output reproduces the
-  INSEE companion xlsx (`deps_calcul_pop_sexe_age_dep_annee.xlsx`)
-  bit-for-bit — see `docs/findings.md` Finding 0b. Switching to
-  AGEREV breaks that equivalence.
-
-Consequence: our 15-24 totals are roughly 1.7% above INSEE's AGEREV
-15-24 at the anchor year. The bias is definitional, not model error —
-when comparing to INSEE AGEREV series, apply an AGEREV conversion
-upstream.
-
 ## Core posture: census redistribution, no demographic model
 
 The pipeline is deliberately not a demographic projection model. It
