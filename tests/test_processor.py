@@ -54,6 +54,7 @@ def sample_parquet(tmp_path):
         "REGION": ["11", "11", "11", "11", "01"],
         "CANTVILLE": ["7599", "7599", "7599", "7599", "9711"],
         "AGEREV": ["18", "18", "19", "20", "18"],
+        "ANAI": ["2004", "2004", "2003", "2002", "2004"],
         "SEXE": ["1", "2", "1", "2", "1"],
         "IPONDI": ["100.5", "150.3", "200.0", "50.0", "75.5"],
     }
@@ -141,22 +142,21 @@ class TestProcessorInit:
         """Test base table flag starts as False."""
         assert processor._base_table_created is False
 
-    def test_rejects_end_year_beyond_forecast_horizon(self):
-        """Test that end_year beyond max valid projection raises ValueError."""
-        # census 2022 + min_age 15 = 2037
-        with pytest.raises(ValueError, match="exceeds maximum valid projection"):
-            PopulationProcessor(
-                year=2022,
-                min_age=15,
-                max_age=24,
-                start_year=2015,
-                end_year=2038,
-                cache_dir=None,
-            )
+    def test_accepts_end_year_beyond_forecast_horizon_with_warning(self, caplog):
+        """end_year beyond year+min_age emits a warning; the SQL drops
+        rows for cohorts not yet born at census time."""
+        processor = PopulationProcessor(
+            year=2022,
+            min_age=15,
+            max_age=24,
+            start_year=2015,
+            end_year=2038,
+            cache_dir=None,
+        )
+        assert processor.end_year == 2038
 
     def test_accepts_end_year_at_forecast_limit(self):
-        """Test that end_year exactly at the limit is accepted."""
-        # census 2022 + min_age 15 = 2037
+        """end_year exactly at year+min_age is within the comfort zone."""
         processor = PopulationProcessor(
             year=2022,
             min_age=15,
@@ -186,7 +186,7 @@ class TestDataProcessing:
         processor._execute(
             sql.CREATE_BASE_TABLE.format(
                 parquet_path=sample_parquet,
-                where_clause="WHERE CAST(AGEREV AS INT) BETWEEN 0 AND 120",
+                where_clause="WHERE (2022 - CAST(ANAI AS INT)) BETWEEN 0 AND 120",
                 year=2022,
                 iris_sentinel_no_geo=IRIS_SENTINEL_NO_GEO,
             )
@@ -858,7 +858,7 @@ class TestSimpleAging:
         )
 
     def test_cohort_aging_forward(self):
-        """Census age 15 in 2022 should become age 18 in 2025."""
+        """Legacy: census age 15 in 2022 should become age 18 in 2025 (same dept)."""
         from passculture.data.insee_population import sql
         from passculture.data.insee_population.projections import (
             compute_geo_ratios,
@@ -901,7 +901,14 @@ class TestSimpleAging:
         compute_geo_ratios(processor.conn, "epci")
         compute_geo_ratios(processor.conn, "canton")
         compute_geo_ratios(processor.conn, "iris")
-        project_multi_year(processor.conn, 15, 20, start_year=2022, end_year=2025)
+        project_multi_year(
+            processor.conn,
+            15,
+            20,
+            start_year=2022,
+            end_year=2025,
+            method="cohort-aging",
+        )
 
         # In 2025, age 15 = census age 12 (=500), age 16 = census age 13 (=300)
         pop_15_2025 = processor.conn.execute("""
@@ -922,209 +929,351 @@ class TestSimpleAging:
 
 
 # -----------------------------------------------------------------------------
-# Test: Downloaders (unit tests for parsing helpers)
+# Test: Cohort-stable (docx) projection method
 # -----------------------------------------------------------------------------
 
 
-class TestDownloaderHelpers:
-    """Tests for downloader parsing functions."""
+def _setup_two_dept_skewed_census(
+    processor: PopulationProcessor,
+) -> None:
+    """Census with very different age-shape per dept.
 
-    def test_parse_quinquennal_sheet(self):
-        """Test quinquennal sheet parsing with mock data."""
-        from passculture.data.insee_population.downloaders import (
-            _FEMALE_OFFSET,
-            _MALE_OFFSET,
-            _parse_quinquennal_sheet,
+    Dept 75 (Paris): few young (14yo=100), many older (18yo=300).
+    Dept 13 (Marseille): many young (14yo=300), few older (18yo=100).
+
+    National cohorts: age 14 = 400, age 18 = 400.
+    Dept share age 14: 25% Paris / 75% Marseille.
+    Dept share age 18: 75% Paris / 25% Marseille.
+    """
+    from passculture.data.insee_population import sql
+
+    processor.conn.execute("""
+        CREATE OR REPLACE TABLE population AS
+        SELECT * FROM (VALUES
+            (2022, '75', '11', '7599', '75101', '751010101', 14, 'male', 100.0),
+            (2022, '75', '11', '7599', '75101', '751010101', 18, 'male', 300.0),
+            (2022, '13', '93', '1301', '13001', '130010101', 14, 'male', 300.0),
+            (2022, '13', '93', '1301', '13001', '130010101', 18, 'male', 100.0)
+        ) AS t(year, department_code, region_code,
+               canton_code, commune_code, iris_code,
+               age, sex, population)
+    """)
+    processor._base_table_created = True
+    _setup_geo_mappings(processor)
+
+    monthly_df = pd.DataFrame(
+        [
+            {"department_code": d, "month": m, "month_ratio": 1.0 / 12}
+            for d in ["75", "13"]
+            for m in range(1, 13)
+        ]
+    )
+    processor._register_dataframe("monthly_births_df", monthly_df)
+    processor._execute(sql.REGISTER_MONTHLY_BIRTHS)
+
+
+class TestCohortStable:
+    """Tests for the cohort-stable (docx) projection method.
+
+    Invariants:
+    1. National cohort totals preserved across years (no mortality/migration).
+    2. Age-specific dept share frozen at census pattern (NOT cohort share).
+    3. Degenerates to census values at Y = census_year.
+    """
+
+    def test_cohort_stable_applies_age_share_not_cohort(self):
+        """At Y=2026, 18yo are distributed using the 2022 18yo share.
+
+        With Paris=300 and Marseille=100 at age 18 (census),
+        share is 75%/25%. At Y=2026, the 18yo cohort is the 2008-born
+        (aged 14 in 2022 → national total 400). Under cohort-stable:
+          Paris: 400 * 0.75 = 300
+          Marseille: 400 * 0.25 = 100
+        (Under cohort-aging, these would be 100 and 300 — cohort stays.)
+        """
+        from passculture.data.insee_population.projections import (
+            compute_geo_ratios,
+            project_multi_year,
         )
 
-        assert _MALE_OFFSET == 23
-        assert _FEMALE_OFFSET == 44
-        assert callable(_parse_quinquennal_sheet)
-
-    def test_month_name_mapping(self):
-        """Test French month name mapping."""
-        from passculture.data.insee_population.downloaders import _MONTH_NAMES
-
-        assert _MONTH_NAMES["janvier"] == 1
-        assert _MONTH_NAMES["décembre"] == 12
-        assert len(_MONTH_NAMES) == 12
-
-    def test_parse_n4d_birth_csv(self):
-        """Test N4D CSV parser extracts department codes and monthly ratios."""
-        from passculture.data.insee_population.downloaders import _parse_n4d_birth_csv
-
-        csv = "\n".join(
-            [
-                "REGDEP_DOMI_MERE;MNAIS;NBNAIS",
-                "1175;01;1200",
-                "1175;02;900",
-                "1175;AN;2100",
-                "2418;01;100",
-                "2418;02;200",
-                "2418;AN;300",
-                "971;01;50",
-                "971;02;50",
-                "971;AN;100",
-                "11XX;01;9999",
-                "97XX;01;9999",
-            ]
+        processor = PopulationProcessor(
+            year=2022,
+            min_age=14,
+            max_age=18,
+            start_year=2022,
+            end_year=2026,
+            cache_dir=None,
         )
-        result = _parse_n4d_birth_csv(csv)
+        _setup_two_dept_skewed_census(processor)
+        compute_geo_ratios(processor.conn, "epci")
+        compute_geo_ratios(processor.conn, "canton")
+        compute_geo_ratios(processor.conn, "iris")
 
-        depts = set(result["department_code"])
-        assert "75" in depts
-        assert "18" in depts
-        assert "971" in depts
+        project_multi_year(
+            processor.conn,
+            14,
+            18,
+            start_year=2022,
+            end_year=2026,
+            method="cohort-stable",
+        )
 
-        for dept, grp in result.groupby("department_code"):
-            assert abs(grp["month_ratio"].sum() - 1.0) < 1e-9, (
-                f"{dept} ratios don't sum to 1"
+        pop_75 = processor.conn.execute("""
+            SELECT population FROM population_department
+            WHERE year = 2026 AND age = 18 AND department_code = '75'
+              AND sex = 'male'
+        """).fetchone()[0]
+        pop_13 = processor.conn.execute("""
+            SELECT population FROM population_department
+            WHERE year = 2026 AND age = 18 AND department_code = '13'
+              AND sex = 'male'
+        """).fetchone()[0]
+
+        assert abs(pop_75 - 300.0) < 0.1, (
+            f"cohort-stable 2026 18yo Paris = {pop_75:.1f}, expected 300.0 "
+            "(400 national 18yo cohort * 75% Paris share)"
+        )
+        assert abs(pop_13 - 100.0) < 0.1, (
+            f"cohort-stable 2026 18yo Marseille = {pop_13:.1f}, expected 100.0"
+        )
+
+    def test_cohort_stable_vs_aging_diverge(self):
+        """With asymmetric age-shape per dept, the two methods diverge."""
+        from passculture.data.insee_population.projections import (
+            compute_geo_ratios,
+            project_multi_year,
+        )
+
+        processor = PopulationProcessor(
+            year=2022,
+            min_age=14,
+            max_age=18,
+            start_year=2022,
+            end_year=2026,
+            cache_dir=None,
+        )
+        _setup_two_dept_skewed_census(processor)
+        compute_geo_ratios(processor.conn, "epci")
+        compute_geo_ratios(processor.conn, "canton")
+        compute_geo_ratios(processor.conn, "iris")
+
+        # cohort-aging: 14yo cohort (300 Marseille, 100 Paris) moves forward
+        # untouched — age 18 in 2026 is 100 Paris / 300 Marseille.
+        project_multi_year(
+            processor.conn,
+            14,
+            18,
+            start_year=2022,
+            end_year=2026,
+            method="cohort-aging",
+        )
+        aging_75 = processor.conn.execute("""
+            SELECT population FROM population_department
+            WHERE year = 2026 AND age = 18 AND department_code = '75'
+              AND sex = 'male'
+        """).fetchone()[0]
+        assert abs(aging_75 - 100.0) < 0.1, (
+            f"cohort-aging 2026 18yo Paris = {aging_75:.1f}, expected 100.0 "
+            "(2022 14yo Paris, aged forward)"
+        )
+
+        # cohort-stable re-run: same data, flip result (300 Paris).
+        project_multi_year(
+            processor.conn,
+            14,
+            18,
+            start_year=2022,
+            end_year=2026,
+            method="cohort-stable",
+        )
+        stable_75 = processor.conn.execute("""
+            SELECT population FROM population_department
+            WHERE year = 2026 AND age = 18 AND department_code = '75'
+              AND sex = 'male'
+        """).fetchone()[0]
+        assert abs(stable_75 - 300.0) < 0.1
+
+        assert abs(stable_75 - aging_75) > 50, (
+            "Methods should diverge substantially on this skewed census"
+        )
+
+    def test_cohort_stable_preserves_national_cohort(self):
+        """National cohort size at Y=2026, age 18 = 2022 14yo national total."""
+        from passculture.data.insee_population.projections import (
+            compute_geo_ratios,
+            project_multi_year,
+        )
+
+        processor = PopulationProcessor(
+            year=2022,
+            min_age=14,
+            max_age=18,
+            start_year=2022,
+            end_year=2026,
+            cache_dir=None,
+        )
+        _setup_two_dept_skewed_census(processor)
+        compute_geo_ratios(processor.conn, "epci")
+        compute_geo_ratios(processor.conn, "canton")
+        compute_geo_ratios(processor.conn, "iris")
+
+        project_multi_year(
+            processor.conn,
+            14,
+            18,
+            start_year=2022,
+            end_year=2026,
+            method="cohort-stable",
+        )
+
+        national_18_2026 = processor.conn.execute("""
+            SELECT SUM(population) FROM population_department
+            WHERE year = 2026 AND age = 18 AND sex = 'male'
+        """).fetchone()[0]
+        # 2022 14yo national total = 100 + 300 = 400
+        assert abs(national_18_2026 - 400.0) < 0.1
+
+    def test_cohort_stable_age_share_invariant_across_years(self):
+        """Cohort-stable: share(dept | sex, age) is constant across years."""
+        from passculture.data.insee_population.projections import (
+            compute_geo_ratios,
+            project_multi_year,
+        )
+
+        processor = PopulationProcessor(
+            year=2022,
+            min_age=14,
+            max_age=18,
+            start_year=2022,
+            end_year=2026,
+            cache_dir=None,
+        )
+        _setup_two_dept_skewed_census(processor)
+        compute_geo_ratios(processor.conn, "epci")
+        compute_geo_ratios(processor.conn, "canton")
+        compute_geo_ratios(processor.conn, "iris")
+
+        project_multi_year(
+            processor.conn,
+            14,
+            18,
+            start_year=2022,
+            end_year=2026,
+            method="cohort-stable",
+        )
+
+        # Paris share of 18yo should be 75% in every year where data exists
+        shares = processor.conn.execute("""
+            SELECT year,
+                   SUM(CASE WHEN department_code = '75'
+                       THEN population ELSE 0 END)
+                 / SUM(population) AS paris_share
+            FROM population_department
+            WHERE age = 18 AND sex = 'male'
+            GROUP BY year
+            ORDER BY year
+        """).df()
+        assert len(shares) >= 2, "Need multiple years to check invariance"
+        for share in shares["paris_share"]:
+            assert abs(share - 0.75) < 1e-6, (
+                f"Paris 18yo share should be 75% every year, got {share:.4f}"
             )
 
-        paris = result[result["department_code"] == "75"].set_index("month")
-        assert abs(paris.loc[1, "month_ratio"] - 1200 / 2100) < 1e-9
-
-
-# -----------------------------------------------------------------------------
-# Test: Quinquennal Cache Re-extrapolation
-# -----------------------------------------------------------------------------
-
-
-class TestQuinquennalCacheReextrapolation:
-    """Tests for quinquennal cache re-extrapolation when end_year exceeds cache."""
-
-    def test_reextrapolates_when_end_year_exceeds_cache(self, tmp_path):
-        """Cached parquet with years 2022-2025 should re-extrapolate to 2028."""
-        from passculture.data.insee_population.downloaders import (
-            download_quinquennal_estimates,
+    def test_cohort_stable_matches_census_at_census_year(self):
+        """For Y = census_year, cohort-stable = cohort-aging = census."""
+        from passculture.data.insee_population.projections import (
+            compute_geo_ratios,
+            project_multi_year,
         )
 
-        rows = []
-        for year in range(2022, 2026):
-            for dept in ["75", "13"]:
-                for sex in ["male", "female"]:
-                    for band in ["15_19", "20_24"]:
-                        rows.append(
-                            {
-                                "year": year,
-                                "department_code": dept,
-                                "sex": sex,
-                                "age_band": band,
-                                "population": 5000.0 + (year - 2022) * 50,
-                            }
-                        )
-        cache_df = pd.DataFrame(rows)
-        cache_dir = tmp_path / "cache"
-        cache_dir.mkdir()
-        cache_df.to_parquet(cache_dir / "quinquennal_estimates.parquet", index=False)
-
-        result = download_quinquennal_estimates(2022, 2028, cache_dir)
-
-        years = sorted(result["year"].unique())
-        assert min(years) == 2022
-        assert max(years) == 2028
-        assert len(years) == 7
-
-    def test_no_reextrapolation_when_cache_sufficient(self, tmp_path):
-        """Cached parquet covering requested range should not re-extrapolate."""
-        from passculture.data.insee_population.downloaders import (
-            download_quinquennal_estimates,
+        processor = PopulationProcessor(
+            year=2022,
+            min_age=14,
+            max_age=18,
+            start_year=2022,
+            end_year=2022,
+            cache_dir=None,
         )
+        _setup_two_dept_skewed_census(processor)
+        compute_geo_ratios(processor.conn, "epci")
+        compute_geo_ratios(processor.conn, "canton")
+        compute_geo_ratios(processor.conn, "iris")
 
-        rows = []
-        for year in range(2020, 2031):
-            rows.append(
-                {
-                    "year": year,
-                    "department_code": "75",
-                    "sex": "male",
-                    "age_band": "15_19",
-                    "population": 5000.0,
-                }
+        project_multi_year(
+            processor.conn,
+            14,
+            18,
+            start_year=2022,
+            end_year=2022,
+            method="cohort-stable",
+        )
+        rows = processor.conn.execute("""
+            SELECT department_code, age, population
+            FROM population_department
+            WHERE year = 2022 AND sex = 'male'
+            ORDER BY department_code, age
+        """).df()
+        got = {(r.department_code, r.age): r.population for r in rows.itertuples()}
+        expected = {
+            ("13", 14): 300.0,
+            ("13", 18): 100.0,
+            ("75", 14): 100.0,
+            ("75", 18): 300.0,
+        }
+        for key, val in expected.items():
+            assert abs(got[key] - val) < 0.1, (
+                f"{key}: got {got[key]:.1f}, expected {val:.1f}"
             )
-        cache_df = pd.DataFrame(rows)
-        cache_dir = tmp_path / "cache"
-        cache_dir.mkdir()
-        cache_df.to_parquet(cache_dir / "quinquennal_estimates.parquet", index=False)
 
-        result = download_quinquennal_estimates(2022, 2028, cache_dir)
-
-        years = sorted(result["year"].unique())
-        assert years == list(range(2022, 2029))
-
-
-# -----------------------------------------------------------------------------
-# Test: Mayotte Age Distribution
-# -----------------------------------------------------------------------------
-
-
-class TestMayotteAgeDistribution:
-    """Tests for Mayotte age distribution using quinquennal estimates."""
-
-    def test_uses_mayotte_own_data(self):
-        """When 976 data is present, it is used directly."""
-        from unittest.mock import patch
-
-        from passculture.data.insee_population.constants import AGE_BUCKETS
-        from passculture.data.insee_population.downloaders import (
-            _get_dom_age_distribution,
+    def test_cohort_stable_monthly_matches_yearly_jan_total(self):
+        """Monthly mode: Jan snapshot total equals yearly-mode total."""
+        from passculture.data.insee_population.projections import (
+            compute_geo_ratios,
+            project_multi_year,
         )
 
-        rows = []
-        for sex in ["male", "female"]:
-            for band_name in AGE_BUCKETS:
-                pop = 5000.0 if band_name == "0_4" else 100.0
-                rows.append(
-                    {
-                        "year": 2022,
-                        "department_code": "976",
-                        "sex": sex,
-                        "age_band": band_name,
-                        "population": pop,
-                    }
-                )
-        mock_df = pd.DataFrame(rows)
-
-        with patch(
-            "passculture.data.insee_population.downloaders.download_quinquennal_estimates",
-            return_value=mock_df,
-        ):
-            dist = _get_dom_age_distribution(2022)
-
-        young_pct = sum(dist[a] for a in range(0, 5))
-        assert young_pct > 0.4
-
-    def test_returns_empty_when_no_976(self):
-        """Returns empty dict when 976 data is absent."""
-        from unittest.mock import patch
-
-        from passculture.data.insee_population.constants import AGE_BUCKETS
-        from passculture.data.insee_population.downloaders import (
-            _get_dom_age_distribution,
+        processor = PopulationProcessor(
+            year=2022,
+            min_age=14,
+            max_age=18,
+            start_year=2022,
+            end_year=2026,
+            cache_dir=None,
         )
+        _setup_two_dept_skewed_census(processor)
+        compute_geo_ratios(processor.conn, "epci")
+        compute_geo_ratios(processor.conn, "canton")
+        compute_geo_ratios(processor.conn, "iris")
 
-        rows = []
-        for dept in ["971", "972", "973", "974"]:
-            for sex in ["male", "female"]:
-                for band_name in AGE_BUCKETS:
-                    rows.append(
-                        {
-                            "year": 2022,
-                            "department_code": dept,
-                            "sex": sex,
-                            "age_band": band_name,
-                            "population": 1000.0,
-                        }
-                    )
-        mock_df = pd.DataFrame(rows)
+        project_multi_year(
+            processor.conn,
+            14,
+            18,
+            start_year=2022,
+            end_year=2026,
+            method="cohort-stable",
+            monthly=False,
+        )
+        yearly_total = processor.conn.execute("""
+            SELECT SUM(population) FROM population_department
+            WHERE year = 2026 AND month = 1
+        """).fetchone()[0]
 
-        with patch(
-            "passculture.data.insee_population.downloaders.download_quinquennal_estimates",
-            return_value=mock_df,
-        ):
-            dist = _get_dom_age_distribution(2022)
+        project_multi_year(
+            processor.conn,
+            14,
+            18,
+            start_year=2022,
+            end_year=2026,
+            method="cohort-stable",
+            monthly=True,
+        )
+        monthly_jan_total = processor.conn.execute("""
+            SELECT SUM(population) FROM population_department
+            WHERE year = 2026 AND month = 1
+        """).fetchone()[0]
 
-        assert dist == {}
+        assert abs(yearly_total - monthly_jan_total) < 0.1
 
 
 # -----------------------------------------------------------------------------
@@ -1829,8 +1978,8 @@ class TestMayottePop1b:
         females = out[out["sex"] == "female"].set_index("age")
         assert females.loc[0, "population"] == 75.0
 
-    def test_build_mayotte_from_pop1b_ages_forward(self, tmp_path, monkeypatch):
-        """POP1B at 2017 must be aged forward to the requested census year."""
+    def test_synthesize_mayotte_pop1b_ages_forward(self, monkeypatch):
+        """POP1B at 2017 ages forward by (year - 2017), raw (no rescale)."""
         from passculture.data.insee_population import downloaders
 
         pop1b = pd.DataFrame(
@@ -1840,69 +1989,17 @@ class TestMayottePop1b:
                 {"age": 11, "sex": "male", "population": 50.0},
             ]
         )
-        estimates = pd.DataFrame(
-            [
-                {
-                    "year": 2022,
-                    "department_code": "976",
-                    "sex": "male",
-                    "population": 150.0,
-                },
-                {
-                    "year": 2022,
-                    "department_code": "976",
-                    "sex": "female",
-                    "population": 120.0,
-                },
-            ]
-        )
-
         monkeypatch.setattr(
             downloaders, "download_mayotte_pop1b", lambda cache_dir=None: pop1b
         )
-        monkeypatch.setattr(
-            downloaders, "download_estimates", lambda cache_dir=None: estimates
-        )
 
-        rows = downloaders._build_mayotte_from_pop1b(
-            year=2022, min_age=0, max_age=120, cache_dir=None
-        )
-        df = pd.DataFrame(rows)
+        df = downloaders.synthesize_mayotte_population(year=2022, cache_dir=None)
 
         # Ages must have advanced by 5 years
         assert set(df["age"]) == {15, 16}
-        # Male total should be scaled to 150 (was 100 + 50 = 150 before scaling,
-        # so factor is 1.0 here)
-        male_total = df[df["sex"] == "male"]["population"].sum()
-        assert abs(male_total - 150.0) < 1e-6
-        # Female rows should be scaled to 120
-        female_total = df[df["sex"] == "female"]["population"].sum()
-        assert abs(female_total - 120.0) < 1e-6
-
-
-# -----------------------------------------------------------------------------
-# Test: Processor wiring for MNAI + Mayotte POP1B
-# -----------------------------------------------------------------------------
-
-
-class TestProcessorUsesMnai:
-    """Verify the processor prefers MNAI and exposes the toggle."""
-
-    def test_use_mnai_flag_default_true(self):
-        proc = PopulationProcessor(
-            year=2022,
-            start_year=2022,
-            end_year=2022,
-            cache_dir=None,
-        )
-        assert proc.use_mnai_birth_month is True
-
-    def test_use_mnai_flag_opt_out(self):
-        proc = PopulationProcessor(
-            year=2022,
-            start_year=2022,
-            end_year=2022,
-            use_mnai_birth_month=False,
-            cache_dir=None,
-        )
-        assert proc.use_mnai_birth_month is False
+        # Raw (no rescaling): totals equal the POP1B values
+        assert df[df["sex"] == "male"]["population"].sum() == 150.0
+        assert df[df["sex"] == "female"]["population"].sum() == 120.0
+        # Every row carries the department / region / iris sentinel metadata
+        assert set(df["department_code"]) == {"976"}
+        assert set(df["region_code"]) == {"06"}

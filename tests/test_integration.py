@@ -18,9 +18,6 @@ from passculture.data.insee_population.constants import (
     DEPARTMENTS_MAYOTTE,
     DEPARTMENTS_METRO,
 )
-from passculture.data.insee_population.downloaders import (
-    download_quinquennal_estimates,
-)
 from passculture.data.insee_population.duckdb_processor import PopulationProcessor
 
 pytestmark = pytest.mark.integration
@@ -29,9 +26,7 @@ CACHE_DIR = Path("data/cache")
 
 REQUIRED_CACHE_FILES = [
     "indcvi_2022.parquet",
-    "quinquennal_estimates.parquet",
     "monthly_birth_distribution.parquet",
-    "population_estimates.parquet",
     "commune_epci.parquet",
     "canton_epci_weights.parquet",
 ]
@@ -63,16 +58,6 @@ def integration_processor():
     return proc
 
 
-@pytest.fixture(scope="module")
-def quinquennal_df():
-    """Load quinquennal estimates for cross-checking."""
-    for fname in REQUIRED_CACHE_FILES:
-        if not (CACHE_DIR / fname).exists():
-            pytest.skip(f"Missing cache file: {fname}")
-
-    return download_quinquennal_estimates(2022, 2024, CACHE_DIR)
-
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -81,85 +66,6 @@ _BAND_FOR_AGE: dict[int, str] = {}
 for _band_name, _ages in AGE_BUCKETS.items():
     for _age in _ages:
         _BAND_FOR_AGE[_age] = _band_name
-
-# Age bands fully covered by the narrowed fixture (max_age=25 → 0_4 through 20_24)
-_COVERED_BANDS = {
-    band for band, ages in AGE_BUCKETS.items() if max(ages) <= 25 and min(ages) >= 0
-}
-
-# Per-band tolerances for census vs quinquennal comparison (Test 1).
-# Young bands have no student mobility effect but small rural departments
-# show ~9-10% sampling variance; 15_19 is transitional (lycee mobility);
-# 20_24 has strong student mobility causing larger discrepancies.
-_BAND_TOLERANCES = {
-    "0_4": 0.10,
-    "5_9": 0.10,
-    "10_14": 0.10,
-    "15_19": 0.12,
-    "20_24": 0.20,
-}
-
-
-# ---------------------------------------------------------------------------
-# Test 1: Census department totals match quinquennal for census year
-# ---------------------------------------------------------------------------
-
-
-def test_census_vs_quinquennal_census_year(integration_processor, quinquennal_df):
-    """Census dept/sex/band totals should respect per-band tolerances."""
-    census_pop = integration_processor.conn.execute("""
-        SELECT
-            department_code,
-            sex,
-            age,
-            SUM(population) AS pop
-        FROM population
-        GROUP BY department_code, sex, age
-    """).df()
-
-    census_pop["age_band"] = census_pop["age"].map(_BAND_FOR_AGE)
-    census_by_band = (
-        census_pop.groupby(["department_code", "sex", "age_band"])["pop"]
-        .sum()
-        .reset_index()
-    )
-
-    quint_2022 = quinquennal_df[quinquennal_df["year"] == 2022].copy()
-
-    # Only compare age bands fully covered by the fixture's age range
-    census_by_band = census_by_band[census_by_band["age_band"].isin(_COVERED_BANDS)]
-    quint_2022 = quint_2022[quint_2022["age_band"].isin(_COVERED_BANDS)]
-
-    merged = census_by_band.merge(
-        quint_2022,
-        on=["department_code", "sex", "age_band"],
-        how="inner",
-        suffixes=("_census", "_quint"),
-    )
-
-    assert len(merged) > 0, "No matching rows between census and quinquennal"
-
-    merged["rel_diff"] = (
-        abs(merged["pop"] - merged["population"]) / merged["population"]
-    )
-
-    # Apply per-band tolerances instead of a blanket 20% threshold.
-    all_failures = []
-    for band, tolerance in _BAND_TOLERANCES.items():
-        band_rows = merged[merged["age_band"] == band]
-        if len(band_rows) == 0:
-            continue
-        failures = band_rows[band_rows["rel_diff"] > tolerance]
-        if len(failures) > 0:
-            cols = ["department_code", "sex", "age_band", "rel_diff"]
-            all_failures.append(
-                f"  {band} ({tolerance:.0%}): "
-                f"{len(failures)} failures\n"
-                f"{failures[cols].head(5)}"
-            )
-    assert len(all_failures) == 0, (
-        "Census vs quinquennal per-band tolerance exceeded:\n" + "\n".join(all_failures)
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -236,61 +142,11 @@ def test_epci_sum_approx_department(integration_processor):
 
 
 # ---------------------------------------------------------------------------
-# Test 4: Projected department totals vs quinquennal
+# Test 4: (removed) Projected department totals vs quinquennal
 # ---------------------------------------------------------------------------
-
-
-def test_projected_dept_sums_to_quinquennal(integration_processor):
-    """Dept yearly population by band should equal quinquennal (month_ratios sum to 1).
-
-    Compares against the quinquennal table as it exists in DuckDB after the
-    pipeline (which may include census-derived replacements), not the raw
-    downloaded estimates.
-    """
-    dept_by_band = integration_processor.conn.execute("""
-        SELECT
-            year,
-            department_code,
-            sex,
-            age,
-            SUM(population) AS total_pop
-        FROM population_department
-        GROUP BY year, department_code, sex, age
-    """).df()
-
-    dept_by_band["age_band"] = dept_by_band["age"].map(_BAND_FOR_AGE)
-    # Only compare age bands fully covered by the fixture's age range
-    dept_by_band = dept_by_band[dept_by_band["age_band"].isin(_COVERED_BANDS)]
-    dept_agg = (
-        dept_by_band.groupby(["year", "department_code", "sex", "age_band"])[
-            "total_pop"
-        ]
-        .sum()
-        .reset_index()
-    )
-
-    # Use the quinquennal table from the processor's DuckDB connection,
-    # which includes census-derived replacements applied by the pipeline.
-    quinq_db = integration_processor.conn.execute("SELECT * FROM quinquennal").df()
-    quint_covered = quinq_db[quinq_db["age_band"].isin(_COVERED_BANDS)]
-    merged = dept_agg.merge(
-        quint_covered,
-        on=["year", "department_code", "sex", "age_band"],
-        how="inner",
-    )
-
-    assert len(merged) > 0, "No matching rows for projected vs quinquennal"
-
-    # Expected: total_pop == population (month_ratios sum to 1, age_ratios sum to 1)
-    merged["rel_diff"] = (
-        abs(merged["total_pop"] - merged["population"]) / merged["population"]
-    )
-    failures = merged[merged["rel_diff"] > 0.001]
-    assert len(failures) == 0, (
-        f"{len(failures)} year/dept/sex/band combos differ "
-        f"from quinquennal by >0.1%:\n"
-        f"{failures[['year', 'department_code', 'sex', 'rel_diff']].head(10)}"
-    )
+# Dropped with the switch to cohort-stable: we no longer pull the INSEE
+# quinquennal publication into the pipeline, and bit-exact agreement with
+# the spec xlsx (see validation/compare_docx_xlsx.py) is the stronger test.
 
 
 # ---------------------------------------------------------------------------
@@ -635,43 +491,8 @@ def test_epci_geo_precision_distribution(census_processor):
 
 
 # ---------------------------------------------------------------------------
-# Test 12: National census vs quinquennal (tighter than per-department)
-# ---------------------------------------------------------------------------
-
-
-def test_national_census_vs_quinquennal(integration_processor, quinquennal_df):
-    """At national level, census and quinquennal should agree within 1.5%."""
-    census_pop = integration_processor.conn.execute("""
-        SELECT sex, age, SUM(population) AS pop
-        FROM population
-        GROUP BY sex, age
-    """).df()
-
-    census_pop["age_band"] = census_pop["age"].map(_BAND_FOR_AGE)
-    census_national = census_pop.groupby(["sex", "age_band"])["pop"].sum().reset_index()
-    census_national = census_national[census_national["age_band"].isin(_COVERED_BANDS)]
-
-    quint_2022 = quinquennal_df[quinquennal_df["year"] == 2022].copy()
-    quint_national = (
-        quint_2022.groupby(["sex", "age_band"])["population"].sum().reset_index()
-    )
-    quint_national = quint_national[quint_national["age_band"].isin(_COVERED_BANDS)]
-
-    merged = census_national.merge(quint_national, on=["sex", "age_band"], how="inner")
-    assert len(merged) > 0, "No matching national-level rows"
-
-    merged["rel_diff"] = (
-        abs(merged["pop"] - merged["population"]) / merged["population"]
-    )
-    failures = merged[merged["rel_diff"] > 0.015]
-    assert len(failures) == 0, (
-        f"{len(failures)} national sex/band combos exceed 1.5% difference:\n"
-        f"{failures[['sex', 'age_band', 'rel_diff']].to_string()}"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Test 13: Student mobility causes 20_24 band to have highest discrepancy
+# Test 12: (removed) National census vs quinquennal
+# Test 13: (removed) Student mobility 20_24 discrepancy vs quinquennal
 # ---------------------------------------------------------------------------
 
 
@@ -735,61 +556,6 @@ def test_student_mobility_correction_valid(integration_processor):
             f"{len(violations)} rows where EPCI/dept ratio outside [0.95, 1.05] "
             f"with student mobility correction:\n{violations.head(10)}"
         )
-
-
-# ---------------------------------------------------------------------------
-# Test 13: Student mobility causes 20_24 band to have highest discrepancy
-# ---------------------------------------------------------------------------
-
-
-def test_student_mobility_band_discrepancy(integration_processor, quinquennal_df):
-    """20_24 has highest median dept discrepancy (student mobility)."""
-    import numpy as np
-
-    census_pop = integration_processor.conn.execute("""
-        SELECT department_code, sex, age, SUM(population) AS pop
-        FROM population
-        GROUP BY department_code, sex, age
-    """).df()
-
-    census_pop["age_band"] = census_pop["age"].map(_BAND_FOR_AGE)
-    census_by_band = (
-        census_pop.groupby(["department_code", "sex", "age_band"])["pop"]
-        .sum()
-        .reset_index()
-    )
-    census_by_band = census_by_band[census_by_band["age_band"].isin(_COVERED_BANDS)]
-
-    quint_2022 = quinquennal_df[quinquennal_df["year"] == 2022].copy()
-    quint_2022 = quint_2022[quint_2022["age_band"].isin(_COVERED_BANDS)]
-
-    merged = census_by_band.merge(
-        quint_2022,
-        on=["department_code", "sex", "age_band"],
-        how="inner",
-    )
-    merged["rel_diff"] = (
-        abs(merged["pop"] - merged["population"]) / merged["population"]
-    )
-
-    # Median relative difference per age band across departments
-    band_medians = merged.groupby("age_band")["rel_diff"].median()
-
-    # 20_24 should have the highest median discrepancy
-    worst_band = band_medians.idxmax()
-    assert worst_band == "20_24", (
-        f"Expected '20_24' to have highest median discrepancy, "
-        f"got '{worst_band}': {band_medians.to_dict()}"
-    )
-
-    # 20_24 median should be >2x the median of other bands
-    median_20_24 = band_medians["20_24"]
-    other_medians = band_medians.drop("20_24")
-    median_others = np.median(other_medians.values)
-    assert median_20_24 > 2 * median_others, (
-        f"20_24 median ({median_20_24:.4f}) should be >2x "
-        f"others median ({median_others:.4f})"
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -881,8 +647,8 @@ def monthly_processor():
     return proc
 
 
-def test_monthly_snapshot_is_full_stock(monthly_processor, quinquennal_df):
-    """Each snapshot month's population must equal the annual quinquennal stock.
+def test_monthly_snapshot_is_full_stock(monthly_processor):
+    """Each snapshot month's population must equal the annual stock.
 
     Population is a stock: 862K 18-year-olds exist in January AND July.
     month_ratio only splits birth-month sub-cohorts within each snapshot.
@@ -890,22 +656,19 @@ def test_monthly_snapshot_is_full_stock(monthly_processor, quinquennal_df):
     Regression: month_ratio was applied twice (projection + export), giving 1/12.
     """
     exported = monthly_processor.to_pandas("department")
-
-    # Compare each snapshot month's total against quinquennal for census year
-    quint_2022 = quinquennal_df[quinquennal_df["year"] == 2022]
-    quint_total = quint_2022[quint_2022["age_band"].isin(_COVERED_BANDS)][
+    jan_total = exported[(exported["year"] == 2022) & (exported["month"] == 1)][
         "population"
     ].sum()
+    assert jan_total > 0
 
     for month in [1, 6, 12]:
         month_pop = exported[(exported["year"] == 2022) & (exported["month"] == month)][
             "population"
         ].sum()
-
-        ratio = month_pop / quint_total if quint_total else 0
-        assert 0.95 <= ratio <= 1.05, (
-            f"Month {month} pop ({month_pop:,.0f}) should equal "
-            f"quinquennal stock ({quint_total:,.0f}), ratio={ratio:.4f}"
+        ratio = month_pop / jan_total
+        assert 0.995 <= ratio <= 1.005, (
+            f"Month {month} pop ({month_pop:,.0f}) should match Jan stock "
+            f"({jan_total:,.0f}); ratio={ratio:.4f}"
         )
 
 
@@ -932,54 +695,6 @@ def test_monthly_yearly_same_stock(integration_processor, monthly_processor):
     )
 
 
-def test_exported_population_matches_quinquennal(integration_processor, quinquennal_df):
-    """Exported department data summed by band must equal quinquennal input.
-
-    End-to-end check: quinquennal -> projection -> birth_month expansion
-    -> exported DataFrame. For the census year (2022), age ratios sum to 1
-    and month ratios sum to 1, so the match must be exact (<0.1%).
-    CAGR-extended years (2023-2024) may diverge slightly.
-    """
-    exported = integration_processor.to_pandas("department")
-    exported["age_band"] = exported["age"].map(_BAND_FOR_AGE)
-
-    # Aggregate exported data by year/dept/sex/band
-    exported_agg = (
-        exported[exported["age_band"].isin(_COVERED_BANDS)]
-        .groupby(["year", "department_code", "sex", "age_band"])["population"]
-        .sum()
-        .reset_index()
-    )
-
-    # Merge with quinquennal
-    quint_covered = quinquennal_df[quinquennal_df["age_band"].isin(_COVERED_BANDS)]
-    merged = exported_agg.merge(
-        quint_covered,
-        on=["year", "department_code", "sex", "age_band"],
-        how="inner",
-        suffixes=("_exported", "_quinq"),
-    )
-
-    assert len(merged) > 0, "No matching rows between exported and quinquennal"
-
-    merged["rel_diff"] = (
-        abs(merged["population_exported"] - merged["population_quinq"])
-        / merged["population_quinq"]
-    )
-
-    # Census year must match exactly (ratios sum to 1)
-    census_rows = merged[merged["year"] == 2022]
-    census_failures = census_rows[census_rows["rel_diff"] > 0.001]
-    assert len(census_failures) == 0, (
-        f"{len(census_failures)} census-year band totals differ by >0.1%:\n"
-        f"{census_failures[['department_code', 'sex', 'rel_diff']].head(10)}"
-    )
-
-    # CAGR-extended years: allow 15% tolerance (growth rate approximation,
-    # outlier departments like Paris with volatile student population)
-    extended_rows = merged[merged["year"] > 2022]
-    extended_failures = extended_rows[extended_rows["rel_diff"] > 0.15]
-    assert len(extended_failures) == 0, (
-        f"{len(extended_failures)} extended-year totals differ by >15%:\n"
-        f"{extended_failures[['year', 'department_code', 'rel_diff']].head(10)}"
-    )
+# Removed test_exported_population_matches_quinquennal: under cohort-stable the
+# binding cross-check is validation/compare_docx_xlsx.py (bit-for-bit match
+# against the INSEE spec xlsx).

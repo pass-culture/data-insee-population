@@ -8,7 +8,7 @@ For the step-by-step pipeline reference, see
 
 | Component | Source | Accuracy |
 |---|---|---|
-| Department population by individual age | INDCVI 2022 census, cohort-aged | Exact at census year; ~0.2% drift over 4 years (no mortality/migration) |
+| Department population by individual age | INDCVI 2022 census (redistributed per `--method`) | Exact at census year; ~0.2% drift over 4 years (no mortality/migration) |
 | Monthly distribution | INDREG MNAI (with regional + metro fallback); N4D fallback | Reflects month of birth of the living population; regional fallback for depts <700k |
 | EPCI geographic split | INDCVI 2022 census | Frozen at census year |
 | EPCI student correction | MOBSCO 2022 commuting data | Direction validated only |
@@ -21,51 +21,56 @@ the simple aging assumption (no mortality/migration). All other
 uncertainty is in how population is distributed across months and
 sub-geographies.
 
-## Core posture: simple aging, anchored per department
+## Core posture: census redistribution, no demographic model
 
 The pipeline is deliberately not a demographic projection model. It
-does not attempt to model fertility, mortality, or migration.
-Population at age `A` in year `Y` is the census population at age
-`A − (Y − census_year)`, full stop.
+does not attempt to model fertility, mortality, or migration. It takes
+the 2022 census (RP2022 INDCVI) and rebuilds a per-year snapshot from
+two assumptions: national cohort sizes are conserved (no deaths, no
+net migration) and either age-specific or cohort-specific geographic
+patterns are frozen at the census.
+
+Two methods are exposed via `--method`:
+
+- **`cohort-stable`** (default): national cohort totals times
+  age-specific census dept shares. For year `Y`, the share of dept `D`
+  among people of age `A`, sex `S` is the census share of `(A, S)` in
+  `D`. This is the method described in the INSEE internal spec doc.
+  It renews the age-specific distribution each year — so the
+  distribution of 18-year-olds in 2026 matches the distribution of
+  18-year-olds at census, *not* the distribution of 14-year-olds at
+  census. This implicitly captures post-bac migration.
+
+- **`cohort-aging`** (legacy): population at age `A` in year `Y` is
+  the census population at age `A − (Y − census_year)` in the same
+  dept. Each cohort ages in place. Closer to a "follow the cohort"
+  view; useful as a reference and for comparing against MOBSCO-based
+  corrections.
+
+Both methods agree at `Y = census_year` and preserve national cohort
+totals. They differ only in how geographic distribution drifts with
+time.
 
 This works because the primary use case (Pass Culture: territorial
 reach for 15-24 year-olds) tolerates ~1-2% total drift over a 4-year
 horizon. Mortality on this band is ~0.05%/year; net inter-department
-migration at these ages is small. Overcomplicating with fertility
-scenarios would add more assumption error than it removes. The
-total error is estimated at ~0.2% over 4 years (2022→2026) for the
-15-24 range; see [`findings.md`](./findings.md) Finding 2.
+migration at these ages is small — but systematic for post-bac cohorts
+concentrating in university cities, which is why `cohort-stable` is
+the default. Overcomplicating with fertility scenarios would add more
+assumption error than it removes. Total error is estimated at ~0.2%
+over 4 years (2022→2026) for the 15-24 range under `cohort-aging`;
+see [`findings.md`](./findings.md) Finding 2.
 
 The horizon cap is mechanical: with `min_age = 15` and
 `census_year = 2022`, projections run safely through 2037. Beyond
 that, the youngest cohort needed was not yet born at census time.
 
 **Consequence — age composition varies across projection years.**
-With simple aging, different birth cohorts enter and exit the 15-24
-window each year. The 20-24 share fluctuates because census cohort
-sizes differ (reflecting historical birth rate variations). This is
-expected demographic structure, not an error.
-
-## Dept-level anchor vs. national growth
-
-Two plausible strategies for extrapolating the census past 2022:
-
-1. Apply a single **national** growth rate per cohort.
-2. Anchor to a **per-department** annual estimate series.
-
-We chose (2): `AGE_PYRAMID_URL` publishes
-`(year × department × sex × age band)` population for 1975 through the
-current year. `compare_dept_growth.py` run over 2017→2022 shows the
-p90 absolute deviation between a department's growth and the national
-growth exceeds 2 percentage points for **every** 5-year band, and the
-five most divergent departments (mean 10-18%) are all DOM (976 at
-17.7%, 973 at 13.1%, etc.). A national-only growth would badly
-understate regional variation, especially for DOM. At EPCI or IRIS
-scale this would propagate into visible bias.
-
-Side effect: because we anchor to a dept series, we do **not** need
-the internal-doc "sanity check on variance by dept / sex" — we
-simply don't make the assumption that check protects against.
+Different birth cohorts enter and exit the 15-24 window each year.
+The 20-24 share fluctuates because census cohort sizes differ
+(reflecting historical birth rate variations). This is expected
+demographic structure, not an error — and it is identical under both
+methods.
 
 ## MNAI over N4D for month-of-birth
 
@@ -161,6 +166,16 @@ pipeline blends census residential ratios with study-destination
 ratios for 15-19 and 20-24 bands, with per-department blend weights
 capped to reflect observed maxima (~60% in IDF suburbs for 20-24,
 ~25% for 15-19 lycée).
+
+**MOBSCO composes with either `--method`.** MOBSCO only modifies
+*within-department* ratios (`geo_ratios_epci`, `geo_ratios_iris`);
+the IRIS variant restricts to intra-dept study flows (see "Why the
+IRIS correction is weaker than the EPCI one" below). Under
+`cohort-stable`, across-dept post-bac migration is already reflected
+in the dept-level age-specific shares, so the two corrections do not
+double-count: MOBSCO addresses intra-dept commuting (e.g.
+residence-in-suburb, studies-in-city-centre) that census residential
+data alone misses. Both methods ship with MOBSCO on by default.
 
 Validation is indirect: university EPCIs show +3 to +8pp on 20-24
 share vs. national mean (Toulouse +8.3, Montpellier +8.2, Grand Paris

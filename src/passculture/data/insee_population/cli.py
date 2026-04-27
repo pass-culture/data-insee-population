@@ -4,10 +4,24 @@ Creates multi-level population tables at department, EPCI, and IRIS levels
 with monthly granularity.
 """
 
+from enum import Enum
 from pathlib import Path
 
 import typer
 from rich.console import Console
+
+
+class Method(str, Enum):
+    """Dept-level projection methods.
+
+    * ``cohort-stable``: national cohort size times age-specific census
+      dept share. Default. Matches the INSEE spec doc.
+    * ``cohort-aging``: legacy -- age each census cohort in place.
+    """
+
+    cohort_stable = "cohort-stable"
+    cohort_aging = "cohort-aging"
+
 
 app = typer.Typer(
     name="insee-population",
@@ -22,12 +36,12 @@ def population(
     min_age: int = typer.Option(0, help="Minimum age"),
     max_age: int = typer.Option(120, help="Maximum age"),
     start_year: int = typer.Option(
-        ...,
+        2019,
         "--start-year",
         help="First projection year",
     ),
     end_year: int = typer.Option(
-        ...,
+        2027,
         "--end-year",
         help="Last projection year",
     ),
@@ -57,14 +71,6 @@ def population(
         "--correct-student-mobility/--no-student-mobility",
         help="Adjust EPCI geo ratios for student commuting (MOBSCO)",
     ),
-    use_mnai_birth_month: bool = typer.Option(
-        True,
-        "--use-mnai/--no-mnai",
-        help=(
-            "Month-of-birth from INDREG MNAI (doc-faithful); "
-            "falls back to N4D birth counts if disabled or unavailable"
-        ),
-    ),
     cache_dir: str = typer.Option(
         "data/cache",
         help="Cache directory for downloads",
@@ -73,6 +79,17 @@ def population(
         False,
         "--monthly/--no-monthly",
         help="Monthly snapshots (12x more rows). Default: yearly at Jan 1st.",
+    ),
+    method: Method = typer.Option(  # noqa: B008
+        Method.cohort_stable,
+        "--method",
+        help=(
+            "Dept-level projection method. "
+            "cohort-stable (default): national cohort x age-specific dept "
+            "share frozen at census (INSEE spec doc). "
+            "cohort-aging: legacy aging in place."
+        ),
+        case_sensitive=False,
     ),
     to_bigquery: bool = typer.Option(
         False,
@@ -121,13 +138,11 @@ def population(
 
     Examples:
 
-        # Preview (dry run)
-        uv run insee-population population \\
-            --start-year 2020 --end-year 2024 --dry-run
+        # Default run: 2019-2027
+        uv run insee-population population
 
-        # Ages 15-24, 2015-2030
-        uv run insee-population population --min-age 15 --max-age 24 \\
-            --start-year 2015 --end-year 2030
+        # Narrow to ages 15-24
+        uv run insee-population population --min-age 15 --max-age 24
     """
     from passculture.data.insee_population.duckdb_processor import (
         PopulationProcessor,
@@ -149,7 +164,8 @@ def population(
     console.print("[bold blue]INSEE Population Import[/bold blue]")
     console.print(
         f"Census year: {year} | Ages: {min_age}-{max_age} | "
-        f"Projection: {start_year}-{end_year} ({mode_label})"
+        f"Projection: {start_year}-{end_year} ({mode_label}) | "
+        f"Method: {method.value}"
     )
 
     if include_mayotte:
@@ -167,7 +183,7 @@ def population(
             include_mayotte=include_mayotte,
             correct_student_mobility=correct_student_mobility,
             monthly=monthly,
-            use_mnai_birth_month=use_mnai_birth_month,
+            method=method.value,
             cache_dir=cache_dir,
         )
     except ValueError as e:

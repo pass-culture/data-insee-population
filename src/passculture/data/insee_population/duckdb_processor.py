@@ -3,10 +3,18 @@
 Creates multi-level population tables at department, EPCI, canton, and IRIS
 levels with geo_precision indicators for data reliability.
 
-Uses simple census aging: population at age A in year Y equals the census
-population at age A-(Y-census_year), with no mortality or migration
-adjustment. Geographic ratios and monthly birth distribution are applied
-on top.
+Two dept-level methods are supported (selected via ``method``):
+
+* ``cohort-stable`` (default): national cohort size times age-specific
+  census dept share. Age-specific dept distribution is frozen at the
+  census pattern and applied afresh each year.
+* ``cohort-aging`` (legacy): census cohort aged in place — the 2022
+  population at age A in dept D becomes the year-Y population at age
+  A+(Y-2022) in dept D.
+
+Both methods preserve national cohort totals (no mortality, no net
+migration). Geographic sub-department ratios and monthly birth
+distribution are applied on top identically for either method.
 """
 
 from __future__ import annotations
@@ -28,11 +36,15 @@ from passculture.data.insee_population.constants import (
 from passculture.data.insee_population.downloaders import (
     download_indcvi,
     download_mnai_birth_distribution,
-    download_monthly_birth_distribution,
+    download_mobsco,
     synthesize_mayotte_population,
 )
 from passculture.data.insee_population.geo_mappings import get_geo_mappings
 from passculture.data.insee_population.projections import (
+    ProjectionMethod,
+    apply_student_mobility_correction,
+    apply_student_mobility_correction_iris,
+    compute_department_mobility_rates,
     compute_geo_ratios,
     project_multi_year,
 )
@@ -75,14 +87,14 @@ class PopulationProcessor:
         year: int = 2022,
         min_age: int = 0,
         max_age: int = MAX_AGE,
-        start_year: int = 2015,
-        end_year: int = 2030,
+        start_year: int = 2022,
+        end_year: int = 2023,
         include_dom: bool = True,
         include_com: bool = True,
         include_mayotte: bool = True,
         correct_student_mobility: bool = True,
         monthly: bool = False,
-        use_mnai_birth_month: bool = True,
+        method: ProjectionMethod = "cohort-stable",
         cache_dir: str | Path | None = "data/cache",
     ) -> None:
         """Initialize processor with filtering options."""
@@ -96,21 +108,26 @@ class PopulationProcessor:
         self.include_mayotte = include_mayotte
         self.correct_student_mobility = correct_student_mobility
         self.monthly = monthly
-        self.use_mnai_birth_month = use_mnai_birth_month
+        self.method: ProjectionMethod = method
         self.cache_dir = Path(cache_dir) if cache_dir else None
 
-        # Validate forecast horizon: simple aging is valid as long as
-        # the youngest cohort in census can be aged to min_age.
-        # census_age = min_age - (end_year - year) >= 0
-        # → end_year <= year + min_age
-        max_valid_year = year + min_age
-        if end_year > max_valid_year:
-            raise ValueError(
-                f"end_year={end_year} exceeds maximum valid projection year "
-                f"({max_valid_year}). With census year {year} and min_age "
-                f"{min_age}, simple aging can only project to "
-                f"{max_valid_year} (beyond that, the youngest cohort "
-                f"was not yet born at census time)."
+        # For each (projection_year, age) we need the cohort born in
+        # (projection_year - age) to exist at census: age_at_census =
+        # age - (projection_year - year) must be >= 0. The SQL JOIN on
+        # cohort_totals drops rows that don't meet this; warn if any
+        # requested (year, age) pair falls outside the census range so
+        # users understand why their output has fewer rows than expected.
+        if end_year > year + min_age:
+            lost_years = end_year - (year + min_age)
+            logger.warning(
+                "end_year={} exceeds year+min_age={}: the {} youngest "
+                "cohort(s) weren't born at census time and will be absent "
+                "from the output for projection years {}-{}.",
+                end_year,
+                year + min_age,
+                lost_years,
+                year + min_age + 1,
+                end_year,
             )
 
         self.conn = duckdb.connect()
@@ -136,7 +153,7 @@ class PopulationProcessor:
         self._execute(
             sql.CREATE_BASE_TABLE.format(
                 parquet_path=parquet_path,
-                where_clause=self._build_where_clause(skip_age_filter=True),
+                where_clause=self._build_where_clause(),
                 year=self.year,
                 iris_sentinel_no_geo=IRIS_SENTINEL_NO_GEO,
             )
@@ -172,50 +189,22 @@ class PopulationProcessor:
         the census population at age A-(Y-census_year).
         """
         sy, ey = self.start_year, self.end_year
-        logger.info("Creating projected tables ({}-{}, simple aging)...", sy, ey)
-
-        # 1. Download and register monthly birth distribution.
-        # Primary source: MNAI from INDREG (month of birth of the living
-        # population, with regional fallback for small departments and
-        # metropolitan fallback for Mayotte). Secondary: N4D (recent birth
-        # counts). Last resort: uniform 1/12.
-        logger.info("Step 1: Loading monthly birth distribution...")
-        monthly_births_df = pd.DataFrame()
-        if self.use_mnai_birth_month:
-            logger.info("  Trying MNAI (INDREG) distribution...")
-            monthly_births_df = download_mnai_birth_distribution(
-                self.year, self.cache_dir
-            )
-        if monthly_births_df.empty:
-            logger.info("  Falling back to N4D birth counts...")
-            monthly_births_df = download_monthly_birth_distribution(self.cache_dir)
-        if monthly_births_df.empty:
-            logger.warning("  Birth data unavailable, using uniform 1/12 distribution")
-            monthly_births_df = self._build_uniform_monthly_distribution()
-
-        # Pad departments present in population but missing from birth data
-        depts_in_pop = set(
-            self._execute("SELECT DISTINCT department_code FROM population").df()[
-                "department_code"
-            ]
+        logger.info(
+            "Creating projected tables ({}-{}, method={})...", sy, ey, self.method
         )
-        depts_in_births = set(monthly_births_df["department_code"])
-        missing = depts_in_pop - depts_in_births
-        if missing:
-            logger.debug(
-                "  Padding {} depts missing from birth data: {}",
-                len(missing),
-                sorted(missing),
-            )
-            pad_rows = [
-                {"department_code": d, "month": m, "month_ratio": 1.0 / 12}
-                for d in missing
-                for m in range(1, 13)
-            ]
-            monthly_births_df = pd.concat(
-                [monthly_births_df, pd.DataFrame(pad_rows)], ignore_index=True
-            )
 
+        # 1. Load monthly birth distribution from INDREG MNAI.
+        # INSEE disclosure rules mean small departments are published only at
+        # REGION level and Mayotte has no dedicated MNAI row; the helper
+        # handles both by falling back within INDREG itself to the regional
+        # and metropolitan aggregates.
+        logger.info("Step 1: Loading monthly birth distribution (MNAI)...")
+        monthly_births_df = download_mnai_birth_distribution(self.year, self.cache_dir)
+        if monthly_births_df.empty:
+            raise RuntimeError(
+                "INDREG MNAI is unavailable — cannot compute monthly "
+                "birth distribution. Check data/cache or network access."
+            )
         self._register_dataframe("monthly_births_df", monthly_births_df)
         self._execute(sql.REGISTER_MONTHLY_BIRTHS)
 
@@ -227,13 +216,6 @@ class PopulationProcessor:
 
         # 2b. Apply student mobility correction to EPCI and IRIS geo ratios
         if self.correct_student_mobility:
-            from passculture.data.insee_population.downloaders import download_mobsco
-            from passculture.data.insee_population.projections import (
-                apply_student_mobility_correction,
-                apply_student_mobility_correction_iris,
-                compute_department_mobility_rates,
-            )
-
             logger.info("Step 2b: Computing department mobility rates...")
             mobsco_path = download_mobsco(self.cache_dir)
             compute_department_mobility_rates(self.conn, mobsco_path)
@@ -244,8 +226,8 @@ class PopulationProcessor:
             logger.info("Step 2d: Correcting IRIS geo ratios for student mobility...")
             apply_student_mobility_correction_iris(self.conn, mobsco_path)
 
-        # 3. Project multi-year at all levels (simple census aging)
-        logger.info("Step 3: Projecting population (simple aging)...")
+        # 3. Project multi-year at all levels
+        logger.info("Step 3: Projecting population (method={})...", self.method)
         project_multi_year(
             self.conn,
             self.min_age,
@@ -254,6 +236,7 @@ class PopulationProcessor:
             end_year=self.end_year,
             census_year=self.year,
             monthly=self.monthly,
+            method=self.method,
         )
 
         return self
@@ -285,25 +268,6 @@ class PopulationProcessor:
             paths[level] = path
 
         return paths
-
-    def get_level_summary(self) -> pd.DataFrame:
-        """Get summary of all geographic levels."""
-        summaries = []
-        for _level, query in [
-            ("department", sql.GET_DEPARTMENT_SUMMARY),
-            ("epci", sql.GET_EPCI_SUMMARY),
-            ("canton", sql.GET_CANTON_SUMMARY),
-            ("iris", sql.GET_IRIS_SUMMARY),
-        ]:
-            try:
-                df = self._execute(query).df()
-                summaries.append(df)
-            except Exception:
-                pass
-
-        if summaries:
-            return pd.concat(summaries, ignore_index=True)
-        return pd.DataFrame()
 
     def to_pandas(self, level: str = "department") -> pd.DataFrame:
         """Export a specific level to pandas DataFrame.
@@ -375,13 +339,14 @@ class PopulationProcessor:
         if not self._base_table_created:
             raise RuntimeError("Call download_and_process() first")
 
-    def _build_where_clause(self, *, skip_age_filter: bool = False) -> str:
-        """Build WHERE clause for filtering census data."""
+    def _build_where_clause(self) -> str:
+        """Build WHERE clause for filtering census data (dept-level only).
+
+        Age filtering is deliberately NOT applied here: cohort-stable needs
+        every cohort referenced by any projection year to exist in census,
+        including ages below ``min_age``.
+        """
         filters = []
-        if not skip_age_filter:
-            filters.append(
-                f"CAST(AGEREV AS INT) BETWEEN {self.min_age} AND {self.max_age}"
-            )
         if not self.include_dom:
             filters.append("DEPT NOT IN ('971', '972', '973', '974')")
         if not self.include_com:
@@ -389,31 +354,14 @@ class PopulationProcessor:
         return "WHERE " + " AND ".join(filters) if filters else ""
 
     def _add_mayotte(self) -> None:
-        """Add Mayotte data from estimates."""
-        try:
-            # Use all ages — age filtering happens in projection SQL
-            mayotte_df = synthesize_mayotte_population(
-                self.year, 0, MAX_AGE, cache_dir=self.cache_dir
+        """Add Mayotte data from POP1B census (raw, aged forward)."""
+        mayotte_df = synthesize_mayotte_population(self.year, cache_dir=self.cache_dir)
+        if mayotte_df.empty:
+            raise RuntimeError(
+                "Mayotte POP1B is unavailable — use --no-mayotte to skip it."
             )
-            if not mayotte_df.empty:
-                self._register_dataframe("mayotte_df", mayotte_df)
-                self._execute(sql.INSERT_MAYOTTE)
-        except Exception as e:
-            logger.warning("  Could not add Mayotte: {}", e)
-
-    def _build_uniform_monthly_distribution(self) -> pd.DataFrame:
-        """Build uniform 1/12 monthly distribution from departments in base table."""
-        depts = (
-            self._execute("SELECT DISTINCT department_code FROM population")
-            .df()["department_code"]
-            .tolist()
-        )
-        rows = [
-            {"department_code": dept, "month": m, "month_ratio": 1.0 / 12}
-            for dept in depts
-            for m in range(1, 13)
-        ]
-        return pd.DataFrame(rows)
+        self._register_dataframe("mayotte_df", mayotte_df)
+        self._execute(sql.INSERT_MAYOTTE)
 
     def _load_geo_mappings(self) -> None:
         """Load commune→EPCI and canton→EPCI weight mappings."""

@@ -26,10 +26,6 @@ INDCVI_URLS = {
     },
 }
 
-# Population estimates URL (used for Mayotte synthesis)
-# Department-level estimates, page 8721456, 1975-2026 (updated Jan 2026)
-POPULATION_ESTIMATES_URL = "https://www.insee.fr/fr/statistiques/fichier/8721456/estim-pop-dep-sexe-gca-1975-2026.xlsx"
-
 # INDREG: individus localisés à la région, contains MNAI (month of birth).
 # Only big departments (>= MNAI_MIN_DEPT_POPULATION) have DEPT populated;
 # small departments are recoverable only at REGION level.
@@ -57,16 +53,6 @@ MAYOTTE_POP1B_URL = (
     "td_Mayotte_Population_2017.zip"
 )
 MAYOTTE_POP1B_MEMBER = "BTX_TD_POP1B_2017.xls"
-
-# Birth data URLs for monthly distribution (fallback when MNAI unavailable)
-BIRTH_DATA_URLS = {
-    # N4D: naissances vivantes par mois et département (page 8582142)
-    # Columns: REGDEP_DOMI_MERE (region+dept), MNAIS (01-12/AN), NBNAIS
-    "by_dept_month": "https://www.insee.fr/fr/statistiques/fichier/8582142/N4D.csv",
-    # Monthly births by department of residence (fallback)
-    # Source: https://www.insee.fr/fr/statistiques/6041515?sommaire=5348638
-    "by_month_dept": "https://www.insee.fr/fr/statistiques/fichier/6041515/naissances_dep_decembre_2021.xlsx",
-}
 
 # MOBSCO (Mobilités Scolaires) — student commuting flows
 # Contains residence commune (COMMUNE) and study commune (DCETUF)
@@ -115,19 +101,6 @@ STUDENT_MOBILITY_BLEND_DEFAULT_BY_BAND: dict[str, float] = {
     "15_19": 0.10,
     "20_24": 0.30,
 }
-
-# Quinquennal age pyramid URL (used for Mayotte synthesis)
-AGE_PYRAMID_URL = "https://www.insee.fr/fr/statistiques/fichier/8721456/estim-pop-dep-sexe-aq-1975-2026.xlsx"
-
-# Columns to extract from INDCVI files
-INDCVI_COLUMNS = [
-    "IRIS",  # IRIS code (9 chars)
-    "DEPT",  # Department code (2-3 chars)
-    "REGION",  # Region code (2 chars)
-    "AGEREV",  # Age in completed years (0-120)
-    "SEXE",  # Sex (1=M, 2=F)
-    "IPONDI",  # Individual weight (15 decimal precision)
-]
 
 # Department codes
 DEPARTMENTS_METRO = [f"{i:02d}" for i in range(1, 96) if i != 20] + ["2A", "2B"]
@@ -278,6 +251,3 @@ POPULATION_SCHEMAS = {
     "canton": POPULATION_SCHEMA_CANTON,
     "iris": POPULATION_SCHEMA_IRIS,
 }
-
-# Backward-compatible alias (most complete schema)
-POPULATION_SCHEMA = POPULATION_SCHEMA_IRIS

@@ -43,21 +43,23 @@ demographic projection. Projections are safe up to
 ```bash
 make install   # Install dependencies
 make test      # Run unit tests
-make run       # Run full pipeline (ages 15-24, 2019-2026) → data/output/
+make run       # Run full pipeline (ages 15-24, 2019-2027) → data/output/
 ```
 
 ### Common CLI variants
 
 ```bash
-# Custom age range and projection window
-uv run insee-population population --min-age 0 --max-age 120 \
-    --start-year 2020 --end-year 2026 -o data/output
+# Default: all ages, 2019-2027 projection
+uv run insee-population population
+
+# Narrow to an age range
+uv run insee-population population --min-age 15 --max-age 24
 
 # Dry run (preview, no files written)
 uv run insee-population population --dry-run
 
-# Disable the MNAI month-of-birth source (use N4D instead)
-uv run insee-population population --no-mnai
+# Switch to the legacy cohort-aging method
+uv run insee-population population --method cohort-aging
 
 # Disable MOBSCO student-mobility correction
 uv run insee-population population --no-student-mobility

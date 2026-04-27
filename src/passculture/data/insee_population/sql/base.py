@@ -12,7 +12,7 @@ CREATE_BASE_TABLE = """
 CREATE OR REPLACE TABLE population AS
 WITH raw_data AS (
     SELECT
-        CAST(AGEREV AS INT) AS age,
+        ({year} - CAST(ANAI AS INT)) AS age,
         CASE SEXE WHEN '1' THEN 'male' WHEN '2' THEN 'female' END AS sex,
         CAST(IPONDI AS DOUBLE) AS weight,
         TRIM(DEPT) AS department_code,

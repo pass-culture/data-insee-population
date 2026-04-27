@@ -53,9 +53,38 @@ Each row carries `population`, `confidence_pct`, `population_low`,
    age distribution from the DOM quinquennal pyramid and apply the
    current-year estimate as the total.
 
-3. **Age the cohorts.** For each projection year `Y`, population at
-   age `A` equals census population at age `A - (Y - census_year)`.
-   No mortality, no migration. Valid for `Y ≤ census_year + min_age`.
+3. **Project the cohorts.** Two methods are available via `--method`:
+
+   - **`cohort-stable`** (default, from the INSEE spec doc). For each
+     projection year `Y`, current age `A`, sex `S`, dept `D`:
+     ```
+     pop(Y, D, A, S) = effectif(Y − A, S) × pct_dept(D | S, A)
+     ```
+     where `effectif(B, S)` is the national total of people born in
+     year `B`, sex `S`, in the census (equivalently: sum over depts of
+     census population at age `census_year − B`, sex `S`); and
+     `pct_dept(D | S, A)` is the census share of dept `D` among people
+     of sex `S`, age `A` at census. The age-specific dept distribution
+     is frozen at the census pattern and applied afresh each year. No
+     mortality, no net migration balance.
+
+   - **`cohort-aging`** (legacy). For each projection year `Y`,
+     population at age `A` equals census population at age
+     `A − (Y − census_year)` in the same dept: each cohort is aged
+     forward while staying in place.
+
+   Both methods preserve national cohort totals and degenerate to the
+   census at `Y = census_year`. They differ in how the geographic
+   distribution evolves for `Y ≠ census_year`:
+   - `cohort-stable` keeps *age-specific* dept shares constant, so the
+     share of 18-year-olds in dept D is the same every year. This
+     implicitly captures post-bac migration (18-year-old distribution
+     reflects where 18-year-olds live, not where they lived at 14).
+   - `cohort-aging` keeps *cohort-specific* dept shares constant, so
+     the 2022 14-year-old distribution becomes the 2026 18-year-old
+     distribution.
+
+   Both methods are valid for `Y ≤ census_year + min_age`.
 
 4. **Month-of-birth distribution.** Load INDREG and compute, per
    department, the share of population born in each month:
@@ -90,9 +119,18 @@ Each row carries `population`, `confidence_pct`, `population_low`,
 ## Running the pipeline
 
 ```bash
-# Default run: ages 15-24, 2019-2026, MNAI + POP1B active
+# Default: cohort-stable, 2019-2027, all ages
+uv run insee-population population
+
+# Narrow to ages 15-24
 uv run insee-population population --min-age 15 --max-age 24 \
-    --start-year 2019 --end-year 2026 -o data/output
+    --start-year 2019 --end-year 2027 -o data/output
+
+# Switch to the legacy cohort-aging method
+uv run insee-population population --method cohort-aging ...
+
+# Monthly snapshots (12 per year instead of a single Jan 1st snapshot)
+uv run insee-population population --monthly ...
 
 # Disable the MNAI month-of-birth source (use N4D instead)
 uv run insee-population population --no-mnai ...
