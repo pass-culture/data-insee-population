@@ -115,6 +115,75 @@ DEPARTMENTS_DOM = [
 DEPARTMENTS_MAYOTTE = ["976"]
 DEPARTMENTS_COM = ["975", "977", "978"]  # Saint-Pierre, Saint-Barth, Saint-Martin
 
+# INSEE region (REGION) → constituent department codes. Used to fall back to
+# a regional month-of-birth distribution for small departments whose DEPT is
+# pooled under '99' in INDREG. COM territories (975, 977, 978) are not part
+# of any INSEE region and fall back to the metropolitan aggregate.
+REGION_TO_DEPARTMENTS: dict[str, list[str]] = {
+    "11": ["75", "77", "78", "91", "92", "93", "94", "95"],  # Île-de-France
+    "24": ["18", "28", "36", "37", "41", "45"],  # Centre-Val de Loire
+    "27": ["21", "25", "39", "58", "70", "71", "89", "90"],  # Bourgogne-FC
+    "28": ["14", "27", "50", "61", "76"],  # Normandie
+    "32": ["02", "59", "60", "62", "80"],  # Hauts-de-France
+    "44": ["08", "10", "51", "52", "54", "55", "57", "67", "68", "88"],  # Grand Est
+    "52": ["44", "49", "53", "72", "85"],  # Pays de la Loire
+    "53": ["22", "29", "35", "56"],  # Bretagne
+    "75": [
+        "16",
+        "17",
+        "19",
+        "23",
+        "24",
+        "33",
+        "40",
+        "47",
+        "64",
+        "79",
+        "86",
+        "87",
+    ],  # Nouvelle-Aquitaine
+    "76": [
+        "09",
+        "11",
+        "12",
+        "30",
+        "31",
+        "32",
+        "34",
+        "46",
+        "48",
+        "65",
+        "66",
+        "81",
+        "82",
+    ],  # Occitanie
+    "84": [
+        "01",
+        "03",
+        "07",
+        "15",
+        "26",
+        "38",
+        "42",
+        "43",
+        "63",
+        "69",
+        "73",
+        "74",
+    ],  # Auvergne-Rhône-Alpes
+    "93": ["04", "05", "06", "13", "83", "84"],  # Provence-Alpes-Côte d'Azur
+    "94": ["2A", "2B"],  # Corse
+    "01": ["971"],  # Guadeloupe
+    "02": ["972"],  # Martinique
+    "03": ["973"],  # Guyane
+    "04": ["974"],  # La Réunion
+    "06": ["976"],  # Mayotte
+}
+
+DEPARTMENT_TO_REGION: dict[str, str] = {
+    dept: region for region, depts in REGION_TO_DEPARTMENTS.items() for dept in depts
+}
+
 # Age bucket definitions (for compatibility with existing data)
 AGE_BUCKETS = {
     "0_4": range(0, 5),

@@ -1916,6 +1916,99 @@ class TestMnaiBirthDistribution:
         out = _read_indreg_mnai(path)
         assert list(out["month"]) == [1]
 
+    def test_small_dept_pooled_under_99_uses_region_distribution(self):
+        """Small depts pooled under DEPT='99' inherit their region's distribution.
+
+        INDREG aggregates small departments under DEPT='99' with the REGION
+        populated. The function must look up each small dept's region (from
+        DEPARTMENT_TO_REGION) and apply the matching regional distribution.
+        """
+        from passculture.data.insee_population.downloaders import (
+            _build_mnai_distribution,
+        )
+
+        # Add INDREG-style '99' rows for region '84' (AURA) skewed to March.
+        # '01' (Ain) is in region '84', has no own DEPT row in the frame,
+        # and should pick up the region '84' distribution.
+        df = self._sample_mnai_rows()
+        extra = pd.DataFrame(
+            [
+                {"DEPT": "99", "REGION": "84", "month": 3, "IPONDI": 900_000},
+                *[
+                    {"DEPT": "99", "REGION": "84", "month": m, "IPONDI": 100_000 / 11}
+                    for m in [1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+                ],
+            ]
+        )
+        extra["MNAI"] = extra["month"].astype(int).astype(str).str.zfill(2)
+        result = _build_mnai_distribution(pd.concat([df, extra], ignore_index=True))
+
+        ain = result[result["department_code"] == "01"].set_index("month")
+        assert len(ain) == 12
+        assert abs(ain.loc[3, "month_ratio"] - 0.9) < 1e-3
+        assert abs(ain["month_ratio"].sum() - 1.0) < 1e-6
+
+    def test_dept_in_region_absent_from_indreg_falls_back_to_metro(self):
+        """When the region itself isn't in INDREG, fall back to metro.
+
+        Region '24' (Centre-Val de Loire) has no rows in the sample frame, so
+        '18' (Cher) falls all the way through to the metropolitan aggregate.
+        """
+        from passculture.data.insee_population.downloaders import (
+            _build_mnai_distribution,
+        )
+
+        result = _build_mnai_distribution(self._sample_mnai_rows())
+        cher = result[result["department_code"] == "18"]
+        assert len(cher) == 12
+        assert abs(cher["month_ratio"].sum() - 1.0) < 1e-6
+
+    def test_all_valid_departments_present(self):
+        """Every metro/DOM/COM/Mayotte code must appear in the output."""
+        from passculture.data.insee_population.constants import (
+            DEPARTMENTS_COM,
+            DEPARTMENTS_DOM,
+            DEPARTMENTS_MAYOTTE,
+            DEPARTMENTS_METRO,
+        )
+        from passculture.data.insee_population.downloaders import (
+            _build_mnai_distribution,
+        )
+
+        result = _build_mnai_distribution(self._sample_mnai_rows())
+        present = set(result["department_code"].unique())
+        expected = (
+            set(DEPARTMENTS_METRO)
+            | set(DEPARTMENTS_DOM)
+            | set(DEPARTMENTS_COM)
+            | set(DEPARTMENTS_MAYOTTE)
+        )
+        assert expected <= present, f"Missing depts: {expected - present}"
+
+    def test_invalid_dept_codes_are_filtered(self):
+        """INDREG rows with non-French DEPT codes (e.g. '99') must not leak."""
+        from passculture.data.insee_population.downloaders import (
+            _build_mnai_distribution,
+        )
+
+        df = self._sample_mnai_rows()
+        # Inject a high-weight '99' row that would otherwise pass the
+        # MNAI_MIN_DEPT_POPULATION threshold.
+        extra = pd.DataFrame(
+            [
+                {
+                    "DEPT": "99",
+                    "REGION": "00",
+                    "month": m,
+                    "IPONDI": 1_000_000,
+                    "MNAI": f"{m:02d}",
+                }
+                for m in range(1, 13)
+            ]
+        )
+        result = _build_mnai_distribution(pd.concat([df, extra], ignore_index=True))
+        assert "99" not in set(result["department_code"].unique())
+
 
 # -----------------------------------------------------------------------------
 # Test: Mayotte 2017 POP1B loader

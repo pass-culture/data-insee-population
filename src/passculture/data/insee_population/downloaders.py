@@ -19,6 +19,10 @@ from loguru import logger
 from rich.progress import Progress
 
 from passculture.data.insee_population.constants import (
+    DEPARTMENT_TO_REGION,
+    DEPARTMENTS_COM,
+    DEPARTMENTS_DOM,
+    DEPARTMENTS_MAYOTTE,
     DEPARTMENTS_METRO,
     INDCVI_URLS,
     INDREG_URLS,
@@ -28,6 +32,16 @@ from passculture.data.insee_population.constants import (
     MAYOTTE_POP1B_URL,
     MNAI_MIN_DEPT_POPULATION,
     MOBSCO_URL,
+)
+
+# Department codes that may appear in INDCVI / monthly_births output. Anything
+# outside this set in INDREG (e.g. '99' = foreign / unknown) is dropped before
+# building the distribution.
+_VALID_DEPARTMENTS = (
+    set(DEPARTMENTS_METRO)
+    | set(DEPARTMENTS_DOM)
+    | set(DEPARTMENTS_COM)
+    | set(DEPARTMENTS_MAYOTTE)
 )
 
 # HTTP timeouts
@@ -158,31 +172,36 @@ def _read_indreg_mnai(parquet_path: Path) -> pd.DataFrame:
 def _build_mnai_distribution(df: pd.DataFrame) -> pd.DataFrame:
     """Turn raw MNAI rows into a (department_code, month, month_ratio) table.
 
-    - Department distribution for departments with total weight >= the INSEE
-      publication threshold.
-    - Region distribution as the fallback; small departments inherit it.
-    - Mayotte (976) and any department absent from INDREG inherit the
-      metropolitan-wide distribution.
+    Per-dept fallback chain, in order of preference:
+    1. Own department distribution if total weight >= the INSEE publication
+       threshold (``big_depts``).
+    2. Regional distribution from INDREG (covers depts pooled under DEPT='99'
+       in their region — INSEE's small-dept aggregate).
+    3. Metropolitan aggregate as a last resort for departments whose region
+       isn't represented in INDREG (Mayotte, DOM, COM territories).
     """
-    dept_totals = df.groupby("DEPT")["IPONDI"].sum()
-    big_depts = set(dept_totals[dept_totals >= MNAI_MIN_DEPT_POPULATION].index) - {""}
+    valid_df = df[df["DEPT"].isin(_VALID_DEPARTMENTS)]
+    dept_totals = valid_df.groupby("DEPT")["IPONDI"].sum()
+    big_depts = set(dept_totals[dept_totals >= MNAI_MIN_DEPT_POPULATION].index)
 
-    dept_rows = _month_ratios(df[df["DEPT"].isin(big_depts)], ["DEPT", "month"], "DEPT")
+    dept_rows = _month_ratios(
+        valid_df[valid_df["DEPT"].isin(big_depts)], ["DEPT", "month"], "DEPT"
+    )
     region_rows = _month_ratios(df, ["REGION", "month"], "REGION")
     metro_rows = _month_ratios(
         df[df["DEPT"].isin(set(DEPARTMENTS_METRO))], ["month"], None
     )
 
-    # Map region → department list using the populated (DEPT, REGION) pairs
-    # in INDREG to fill small departments from their region's distribution.
-    dept_region = (
-        df[df["DEPT"] != ""][["DEPT", "REGION"]]
-        .drop_duplicates()
-        .reset_index(drop=True)
-    )
+    region_distributions: dict[str, list[tuple[int, float]]] = {
+        region: [(int(r["month"]), float(r["month_ratio"])) for _, r in grp.iterrows()]
+        for region, grp in region_rows.groupby("REGION")
+    }
+    metro_dist: list[tuple[int, float]] = [
+        (int(r["month"]), float(r["month_ratio"])) for _, r in metro_rows.iterrows()
+    ]
 
     rows: list[dict] = []
-    for dept in dept_region["DEPT"].unique():
+    for dept in sorted(_VALID_DEPARTMENTS):
         if dept in big_depts:
             for _, r in dept_rows[dept_rows["DEPT"] == dept].iterrows():
                 rows.append(
@@ -193,28 +212,13 @@ def _build_mnai_distribution(df: pd.DataFrame) -> pd.DataFrame:
                     }
                 )
             continue
-        region = dept_region[dept_region["DEPT"] == dept]["REGION"].iloc[0]
-        region_dist = region_rows[region_rows["REGION"] == region]
-        if region_dist.empty:
-            # no region data - fall back to metro aggregate below
-            continue
-        for _, r in region_dist.iterrows():
-            rows.append(
-                {
-                    "department_code": dept,
-                    "month": int(r["month"]),
-                    "month_ratio": float(r["month_ratio"]),
-                }
-            )
 
-    # Mayotte (absent from INDREG) + any dept missing above uses the
-    # metropolitan aggregate.
-    metro_dict = {
-        int(r["month"]): float(r["month_ratio"]) for _, r in metro_rows.iterrows()
-    }
-    existing_depts = {r["department_code"] for r in rows}
-    for dept in {"976", *existing_depts} - existing_depts:
-        for month, ratio in metro_dict.items():
+        region = DEPARTMENT_TO_REGION.get(dept)
+        dist = region_distributions.get(region) if region else None
+        if not dist:
+            # Region absent from INDREG (Mayotte, DOM, COM): use metro.
+            dist = metro_dist
+        for month, ratio in dist:
             rows.append({"department_code": dept, "month": month, "month_ratio": ratio})
 
     return (
