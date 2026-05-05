@@ -24,6 +24,7 @@ from passculture.data.insee_population.constants import (
     DEPARTMENTS_DOM,
     DEPARTMENTS_MAYOTTE,
     DEPARTMENTS_METRO,
+    DEPARTMENTS_TOM,
     INDCVI_URLS,
     INDREG_URLS,
     IRIS_SENTINEL_NO_GEO,
@@ -32,6 +33,12 @@ from passculture.data.insee_population.constants import (
     MAYOTTE_POP1B_URL,
     MNAI_MIN_DEPT_POPULATION,
     MOBSCO_URL,
+    NCL_CENSUS_URL,
+    NCL_CENSUS_YEAR,
+    PYF_CENSUS_URL,
+    PYF_CENSUS_YEAR,
+    WLF_CENSUS_URL,
+    WLF_CENSUS_YEAR,
 )
 
 # Department codes that may appear in INDCVI / monthly_births output. Anything
@@ -42,6 +49,7 @@ _VALID_DEPARTMENTS = (
     | set(DEPARTMENTS_DOM)
     | set(DEPARTMENTS_COM)
     | set(DEPARTMENTS_MAYOTTE)
+    | set(DEPARTMENTS_TOM)
 )
 
 # HTTP timeouts
@@ -495,3 +503,307 @@ def synthesize_mayotte_population(
         "  Added {} Mayotte rows ({:,.0f} population)", len(df), df["population"].sum()
     )
     return df
+
+
+# -----------------------------------------------------------------------------
+# TOM Pacifique: Wallis-Futuna (986), Polynésie française (987),
+#                Nouvelle-Calédonie (988)
+# -----------------------------------------------------------------------------
+
+# French 5-year age band labels → band start age.
+# Used by both WLF and NCL parsers.
+_QUINQUENNAL_LABELS: dict[str, int] = {
+    "0 à 4 ans": 0,
+    "5 à 9 ans": 5,
+    "10 à 14 ans": 10,
+    "15 à 19 ans": 15,
+    "20 à 24 ans": 20,
+    "25 à 29 ans": 25,
+    "30 à 34 ans": 30,
+    "35 à 39 ans": 35,
+    "40 à 44 ans": 40,
+    "45 à 49 ans": 45,
+    "50 à 54 ans": 50,
+    "55 à 59 ans": 55,
+    "60 à 64 ans": 60,
+    "65 à 69 ans": 65,
+    "70 à 74 ans": 70,
+    "75 à 79 ans": 75,
+    "80 à 84 ans": 80,
+    "80 ans et +": 80,
+    "85 ans et +": 85,
+}
+
+
+def _expand_quinquennal_to_ages(
+    bands: list[tuple[int, float, float]],
+    open_end_start: int,
+    max_age: int = 100,
+) -> pd.DataFrame:
+    """Expand (start_age, male_pop, female_pop) 5-year bands to individual ages.
+
+    Each band distributes its population uniformly across its ages. The open-
+    ended last band spans [open_end_start, max_age].
+    """
+    rows = []
+    for start, male, female in bands:
+        ages = (
+            range(open_end_start, max_age + 1)
+            if start >= open_end_start
+            else range(start, start + 5)
+        )
+        n = len(ages)
+        for age in ages:
+            if male > 0:
+                rows.append({"age": age, "sex": "male", "population": male / n})
+            if female > 0:
+                rows.append({"age": age, "sex": "female", "population": female / n})
+    return pd.DataFrame(rows)
+
+
+def download_wlf_census(cache_dir: Path | None = None) -> pd.DataFrame:
+    """Download Wallis-et-Futuna 2023 census (STSEE XLSX).
+
+    Parses sheet "Tableau Pop_01": 5-year age bands x sex, total-territory
+    columns (Hommes=22, Femmes=23). Returns DataFrame with age, sex, population.
+    """
+    cache_path = cache_dir / "wlf_census_2023.parquet" if cache_dir else None
+    if cache_path and cache_path.exists():
+        return pd.read_parquet(cache_path)
+
+    try:
+        logger.info("Downloading Wallis-et-Futuna 2023 census from STSEE...")
+        response = requests.get(WLF_CENSUS_URL, timeout=ESTIMATES_TIMEOUT)
+        response.raise_for_status()
+        df = _parse_wlf_xlsx(response.content)
+    except Exception as e:
+        logger.warning("Could not fetch WLF census: {}", e)
+        return pd.DataFrame()
+
+    if df.empty:
+        return df
+    if cache_path and cache_dir:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        df.to_parquet(cache_path, index=False)
+    return df
+
+
+def _parse_wlf_xlsx(xlsx_bytes: bytes) -> pd.DataFrame:
+    """Parse STSEE Wallis-et-Futuna census XLSX population table.
+
+    Sheet "Tableau Pop_01" layout:
+      row 3: district headers; col 22 = "WALLIS ET FUTUNA" (merged)
+      row 4: Hommes / Femmes / Total per district
+      rows 5-22: age bands "0 à 4 ans" … "85 ans et +"
+      col 22 = Hommes total territory, col 23 = Femmes total territory
+    """
+    import openpyxl
+
+    wb = openpyxl.load_workbook(io.BytesIO(xlsx_bytes), read_only=True, data_only=True)
+    ws = wb["Tableau Pop_01"]
+    rows = list(ws.iter_rows(values_only=True))
+
+    bands: list[tuple[int, float, float]] = []
+    open_end_start = 85
+    for row in rows:
+        label = str(row[0]).strip() if row[0] is not None else ""
+        start = _QUINQUENNAL_LABELS.get(label)
+        if start is None:
+            continue
+        male = _safe_float(row[22])
+        female = _safe_float(row[23])
+        if label in ("80 ans et +", "85 ans et +"):
+            open_end_start = start
+        bands.append((start, male, female))
+
+    wb.close()
+    return _expand_quinquennal_to_ages(bands, open_end_start)
+
+
+def download_ncl_census(cache_dir: Path | None = None) -> pd.DataFrame:
+    """Download Nouvelle-Calédonie 2019 census (ISEE XLS).
+
+    Parses sheet "P02": 5-year age bands x sex, total-NC columns
+    (Hommes=10, Femmes=11). Returns DataFrame with age, sex, population.
+    """
+    cache_path = cache_dir / "ncl_census_2019.parquet" if cache_dir else None
+    if cache_path and cache_path.exists():
+        return pd.read_parquet(cache_path)
+
+    try:
+        logger.info("Downloading Nouvelle-Calédonie 2019 census from ISEE...")
+        response = requests.get(NCL_CENSUS_URL, timeout=ESTIMATES_TIMEOUT)
+        response.raise_for_status()
+        df = _parse_ncl_xls(response.content)
+    except Exception as e:
+        logger.warning("Could not fetch NCL census: {}", e)
+        return pd.DataFrame()
+
+    if df.empty:
+        return df
+    if cache_path and cache_dir:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        df.to_parquet(cache_path, index=False)
+    return df
+
+
+def _parse_ncl_xls(xls_bytes: bytes) -> pd.DataFrame:
+    """Parse ISEE Nouvelle-Calédonie 2019 XLS population table.
+
+    Sheet "P02" layout:
+      row 2: province headers; col 10 = "Nouvelle-Calédonie" (merged)
+      row 3: Hommes / Femmes / Total per province
+      rows 4-20: age bands "0 à 4 ans" … "80 ans et +"
+      col 10 = Hommes total NC, col 11 = Femmes total NC
+    """
+    raw = pd.read_excel(io.BytesIO(xls_bytes), sheet_name="P02", header=None)
+    bands: list[tuple[int, float, float]] = []
+    open_end_start = 80
+    for _, row in raw.iterrows():
+        label = str(row.iloc[0]).strip() if not pd.isna(row.iloc[0]) else ""
+        start = _QUINQUENNAL_LABELS.get(label)
+        if start is None:
+            continue
+        male = _safe_float(row.iloc[10])
+        female = _safe_float(row.iloc[11])
+        if label == "80 ans et +":
+            open_end_start = 80
+        bands.append((start, male, female))
+
+    return _expand_quinquennal_to_ages(bands, open_end_start)
+
+
+def download_pyf_census(cache_dir: Path | None = None) -> pd.DataFrame:
+    """Download Polynésie française demographics CSV (ISPF via data.gouv.fr).
+
+    CSV columns: Année;Âge;Sexe;Pop
+    Sexe 1 = male (Pop is negative for pyramid display → take abs).
+    Sexe 2 = female.
+    Filters to the most recent year available (PYF_CENSUS_YEAR).
+    Returns DataFrame with age, sex, population.
+    """
+    cache_path = (
+        cache_dir / f"pyf_census_{PYF_CENSUS_YEAR}.parquet" if cache_dir else None
+    )
+    if cache_path and cache_path.exists():
+        return pd.read_parquet(cache_path)
+
+    try:
+        logger.info(
+            "Downloading Polynésie française {} demographics from data.gouv.fr...",
+            PYF_CENSUS_YEAR,
+        )
+        response = requests.get(PYF_CENSUS_URL, timeout=ESTIMATES_TIMEOUT)
+        response.raise_for_status()
+        df = _parse_pyf_csv(response.content)
+    except Exception as e:
+        logger.warning("Could not fetch PYF demographics: {}", e)
+        return pd.DataFrame()
+
+    if df.empty:
+        return df
+    if cache_path and cache_dir:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        df.to_parquet(cache_path, index=False)
+    return df
+
+
+def _parse_pyf_csv(csv_bytes: bytes) -> pd.DataFrame:
+    """Parse ISPF/data.gouv.fr Polynésie française demographics CSV.
+
+    Format: Année;Âge;Sexe;Pop  (semicolon-separated).
+    Pop is negative for males (pyramid convention) — we take abs.
+    Filters to PYF_CENSUS_YEAR. Ages are individual (0, 1, ..., 90+).
+    """
+    df = pd.read_csv(io.BytesIO(csv_bytes), sep=";", dtype=str)
+    df.columns = [c.strip() for c in df.columns]
+    df["Année"] = pd.to_numeric(df["Année"], errors="coerce")
+    df = df[df["Année"] == PYF_CENSUS_YEAR].copy()
+    if df.empty:
+        logger.warning("PYF CSV: no rows for year {}", PYF_CENSUS_YEAR)
+        return pd.DataFrame()
+
+    df["age"] = pd.to_numeric(df["Âge"], errors="coerce")
+    df["pop"] = pd.to_numeric(df["Pop"], errors="coerce").abs()
+    df["sex"] = df["Sexe"].map({"1": "male", "2": "female"})
+    df = df.dropna(subset=["age", "pop", "sex"])
+    df = df[df["pop"] > 0]
+
+    return (
+        df[["age", "sex", "pop"]]
+        .rename(columns={"pop": "population"})
+        .assign(age=lambda d: d["age"].astype(int))
+        .sort_values(["age", "sex"])
+        .reset_index(drop=True)
+    )
+
+
+def synthesize_tom_population(
+    year: int,
+    cache_dir: Path | None = None,
+) -> pd.DataFrame:
+    """Build TOM Pacifique (986/987/988) population rows for the given year.
+
+    Downloads each territory's census (WLF 2023, PYF 2019, NCL 2019) and
+    ages the population forward to ``year`` by shifting individual ages.
+    Returns an empty DataFrame if all three sources fail.
+    """
+    logger.info("Adding TOM Pacifique (986/987/988) for year {}...", year)
+
+    sources: list[tuple[str, str, int, object]] = [
+        ("986", "Wallis-Futuna", WLF_CENSUS_YEAR, download_wlf_census),
+        ("987", "Polynésie française", PYF_CENSUS_YEAR, download_pyf_census),
+        ("988", "Nouvelle-Calédonie", NCL_CENSUS_YEAR, download_ncl_census),
+    ]
+
+    parts: list[pd.DataFrame] = []
+    for dept, name, census_year, downloader in sources:
+        offset = year - census_year
+        if offset < 0:
+            logger.warning(
+                "  {} ({}): requested year {} before census year {}; skipping",
+                dept,
+                name,
+                year,
+                census_year,
+            )
+            continue
+
+        pop = downloader(cache_dir)
+        if pop.empty:
+            logger.warning("  {} ({}): census unavailable, skipping", dept, name)
+            continue
+
+        aged = pop.copy()
+        aged["age"] = aged["age"] + offset
+        aged = aged[aged["population"] > 0]
+        if aged.empty:
+            continue
+
+        rows = [
+            {
+                "year": year,
+                "department_code": dept,
+                "region_code": "98",
+                "canton_code": f"{dept}9",
+                "commune_code": "",
+                "iris_code": IRIS_SENTINEL_NO_GEO,
+                "age": int(r["age"]),
+                "sex": r["sex"],
+                "population": float(r["population"]),
+            }
+            for _, r in aged.iterrows()
+        ]
+        part = pd.DataFrame(rows)
+        logger.debug(
+            "  {} ({}) — {} rows, {:,.0f} population",
+            dept,
+            name,
+            len(part),
+            part["population"].sum(),
+        )
+        parts.append(part)
+
+    if not parts:
+        return pd.DataFrame()
+    return pd.concat(parts, ignore_index=True)

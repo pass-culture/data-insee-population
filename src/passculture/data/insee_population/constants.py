@@ -114,6 +114,32 @@ DEPARTMENTS_DOM = [
 # 976 (Mayotte) has separate census - not in standard INDCVI files
 DEPARTMENTS_MAYOTTE = ["976"]
 DEPARTMENTS_COM = ["975", "977", "978"]  # Saint-Pierre, Saint-Barth, Saint-Martin
+# TOM Pacifique: separate censuses from STSEE/ISEE/data.gouv.fr
+DEPARTMENTS_TOM = [
+    "986",
+    "987",
+    "988",
+]  # Wallis-Futuna, Polynésie FR, Nouvelle-Calédonie
+
+# Wallis-et-Futuna 2023 census (STSEE) — population by sex and 5-year age band
+WLF_CENSUS_YEAR = 2023
+WLF_CENSUS_URL = (
+    "https://www.statistique.wf/download/124/recensement-2023/2328/"
+    "principaux_tableaux_population_rp2023.xlsx"
+)
+
+# Nouvelle-Calédonie 2019 census (ISEE) — population by sex and 5-year age band
+NCL_CENSUS_YEAR = 2019
+NCL_CENSUS_URL = (
+    "https://www.isee.nc/component/phocadownload/category/193-recensement?download=1980"
+)
+
+# Polynésie française demographics 1983-2019 (ISPF via data.gouv.fr) — individual ages
+PYF_CENSUS_YEAR = 2019
+PYF_CENSUS_URL = (
+    "https://static.data.gouv.fr/resources/demographie-de-la-polynesie-francaise/"
+    "20260311-231602/10006.csv"
+)
 
 # INSEE region (REGION) → constituent department codes. Used to fall back to
 # a regional month-of-birth distribution for small departments whose DEPT is
@@ -178,6 +204,7 @@ REGION_TO_DEPARTMENTS: dict[str, list[str]] = {
     "03": ["973"],  # Guyane
     "04": ["974"],  # La Réunion
     "06": ["976"],  # Mayotte
+    "98": ["986", "987", "988"],  # Collectivités du Pacifique (TOM)
 }
 
 DEPARTMENT_TO_REGION: dict[str, str] = {

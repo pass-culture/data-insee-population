@@ -66,6 +66,14 @@ def population(
         "--include-mayotte/--no-mayotte",
         help="Include Mayotte (976) synthesized from estimates",
     ),
+    include_tom: bool = typer.Option(
+        True,
+        "--include-tom/--no-tom",
+        help=(
+            "Include TOM Pacifique (986/987/988): "
+            "Wallis-Futuna, Polynésie FR, Nouvelle-Calédonie"
+        ),
+    ),
     correct_student_mobility: bool = typer.Option(
         True,
         "--correct-student-mobility/--no-student-mobility",
@@ -170,6 +178,8 @@ def population(
 
     if include_mayotte:
         console.print("[dim]+ Including Mayotte (976)[/dim]")
+    if include_tom:
+        console.print("[dim]+ Including TOM Pacifique (986/987/988)[/dim]")
 
     try:
         processor = PopulationProcessor(
@@ -181,6 +191,7 @@ def population(
             include_dom=include_dom,
             include_com=include_com,
             include_mayotte=include_mayotte,
+            include_tom=include_tom,
             correct_student_mobility=correct_student_mobility,
             monthly=monthly,
             method=method.value,

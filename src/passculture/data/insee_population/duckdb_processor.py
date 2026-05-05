@@ -30,6 +30,7 @@ from passculture.data.insee_population import sql
 from passculture.data.insee_population.constants import (
     DEPARTMENTS_DOM,
     DEPARTMENTS_METRO,
+    DEPARTMENTS_TOM,
     IRIS_SENTINEL_NO_GEO,
     MAX_AGE,
 )
@@ -38,6 +39,7 @@ from passculture.data.insee_population.downloaders import (
     download_mnai_birth_distribution,
     download_mobsco,
     synthesize_mayotte_population,
+    synthesize_tom_population,
 )
 from passculture.data.insee_population.geo_mappings import get_geo_mappings
 from passculture.data.insee_population.projections import (
@@ -92,6 +94,7 @@ class PopulationProcessor:
         include_dom: bool = True,
         include_com: bool = True,
         include_mayotte: bool = True,
+        include_tom: bool = True,
         correct_student_mobility: bool = True,
         monthly: bool = False,
         method: ProjectionMethod = "cohort-stable",
@@ -106,6 +109,7 @@ class PopulationProcessor:
         self.include_dom = include_dom
         self.include_com = include_com
         self.include_mayotte = include_mayotte
+        self.include_tom = include_tom
         self.correct_student_mobility = correct_student_mobility
         self.monthly = monthly
         self.method: ProjectionMethod = method
@@ -164,6 +168,9 @@ class PopulationProcessor:
 
         if self.include_mayotte:
             self._add_mayotte()
+
+        if self.include_tom:
+            self._add_tom()
 
         return self
 
@@ -363,6 +370,16 @@ class PopulationProcessor:
         self._register_dataframe("mayotte_df", mayotte_df)
         self._execute(sql.INSERT_MAYOTTE)
 
+    def _add_tom(self) -> None:
+        """Add TOM Pacifique data from territory censuses (aged forward)."""
+        tom_df = synthesize_tom_population(self.year, cache_dir=self.cache_dir)
+        if tom_df.empty:
+            raise RuntimeError(
+                "All TOM Pacifique censuses unavailable — use --no-tom to skip."
+            )
+        self._register_dataframe("tom_df", tom_df)
+        self._execute(sql.INSERT_TOM)
+
     def _load_geo_mappings(self) -> None:
         """Load commune→EPCI and canton→EPCI weight mappings."""
         if self._geo_mappings_loaded:
@@ -396,3 +413,11 @@ class PopulationProcessor:
             )
 
         results["stats"]["mayotte_present"] = "976" in present
+
+        present_tom = set(DEPARTMENTS_TOM) & present
+        missing_tom = set(DEPARTMENTS_TOM) - present
+        results["stats"]["tom_present"] = sorted(present_tom)
+        if missing_tom:
+            results["warnings"].append(
+                f"Missing TOM departments: {sorted(missing_tom)}"
+            )
