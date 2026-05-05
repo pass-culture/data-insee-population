@@ -1,4 +1,4 @@
-.PHONY: install dev test test-integration lint format run info clean dashboard-prepare dashboard-install dashboard-up help
+.PHONY: install dev test test-integration lint format run info clean help
 .DEFAULT_GOAL := run
 
 UV := uv
@@ -35,13 +35,3 @@ clean:  ## Clean cache and temp files
 	rm -rf data/output/*.parquet
 	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 	find . -type d -name ".pytest_cache" -exec rm -rf {} + 2>/dev/null || true
-
-# Dashboard
-dashboard-prepare:  ## Prepare dashboard data (split IRIS, download GeoJSON)
-	$(UV) run python dashboard/prepare_dashboard_data.py
-
-dashboard-install:  ## Install dashboard npm dependencies
-	cd dashboard && npm install
-
-dashboard-up:  ## Serve dashboard locally
-	cd dashboard && npx vite

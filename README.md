@@ -94,21 +94,11 @@ Four parquet files under `data/output/`, each with one row per
 plus derived `snapshot_month`, `born_date`, `decimal_age`. Full
 schema in [docs/method.md](docs/method.md).
 
-## Dashboard
-
-Interactive exploration of the output (maps, age pyramids, time series):
-
-```bash
-make run                # Generate population data
-make dashboard-prepare  # Split IRIS, download GeoJSON
-make dashboard-up       # Serve dashboard locally
-```
-
 ## Development
 
 ```bash
 make install           # Install dependencies
-make dev               # Add dev deps (jupyter, geopandas…)
+make dev               # Add dev deps
 make test              # Unit tests
 make test-integration  # Integration tests (requires data/cache/ populated)
 make lint              # Ruff linter
