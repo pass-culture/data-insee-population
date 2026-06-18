@@ -8,12 +8,13 @@ For the step-by-step pipeline reference, see
 
 | Component | Source | Accuracy |
 |---|---|---|
-| Department population by individual age | INDCVI 2022 census (redistributed per `--method`) | Exact at census year; ~0.2% drift over 4 years (no mortality/migration) |
+| National cohort total by year × génération × sex | INSEE annual estimates (POP3, `cohort-estimates`) | Matches INSEE France entière exactly; the authoritative "reality" figure, revised each release |
+| Department population by individual age | INDCVI 2022 census, redistributed per `--method` (totals re-anchored under `cohort-estimates`) | Spatial/age split exact at census year; national total = INSEE estimate per year |
 | Monthly distribution | INDREG MNAI (with regional + metro fallback); N4D fallback | Reflects month of birth of the living population; regional fallback for depts <700k |
 | EPCI geographic split | INDCVI 2022 census | Frozen at census year |
 | EPCI student correction | MOBSCO 2022 commuting data | Direction validated only |
 | IRIS geographic split | INDCVI 2022 census, commune-distributed | 100% pop; ~60% sub-commune resolution |
-| Mayotte | 2017 POP1B census aged forward (quinquennal fallback) | Precise age pyramid; totals rescaled to current INSEE estimate |
+| Mayotte | 2017 POP1B census aged forward | Age pyramid from 2017; sits inside the anchored métropole+5DOM total under `cohort-estimates`, so its share is approximate |
 
 **Key implication**: department-level population at each individual age
 is exact at census year. For projection years, the only error source is
@@ -30,9 +31,17 @@ two assumptions: national cohort sizes are conserved (no deaths, no
 net migration) and either age-specific or cohort-specific geographic
 patterns are frozen at the census.
 
-Two methods are exposed via `--method`:
+Three methods are exposed via `--method`:
 
-- **`cohort-stable`** (default): national cohort totals times
+- **`cohort-estimates`** (default): the `cohort-stable` redistribution,
+  but the national cohort total per `(year, génération, sex)` is taken
+  from INSEE's latest annual estimates (POP3, France entière) instead of
+  the frozen RP2022 count. RP2022 still supplies every fine-grain ratio
+  (which dept/EPCI/IRIS, which exact age in band, which sex, which birth
+  month). This is the only method whose national totals track reality
+  over time — see [Why not RP2022 alone](#why-not-rp2022-alone).
+
+- **`cohort-stable`**: national cohort totals times
   age-specific census dept shares. For year `Y`, the share of dept `D`
   among people of age `A`, sex `S` is the census share of `(A, S)` in
   `D`. This is the method described in the INSEE internal spec doc.
@@ -69,8 +78,86 @@ that, the youngest cohort needed was not yet born at census time.
 Different birth cohorts enter and exit the 15-24 window each year.
 The 20-24 share fluctuates because census cohort sizes differ
 (reflecting historical birth rate variations). This is expected
-demographic structure, not an error — and it is identical under both
+demographic structure, not an error — and it is identical under all
 methods.
+
+## Why not RP2022 alone
+
+RP2022 is the most spatially detailed source we have — it is the *only*
+input with population down to IRIS, by single year of age and sex. That
+is exactly what the geographic KPIs need, and nothing replaces it for
+the *distribution* of population.
+
+But RP2022 is a single snapshot, and `cohort-stable` / `cohort-aging`
+**freeze** each cohort at its 2022 size for every projection year. That
+is wrong for two reasons:
+
+1. **A cohort's size changes after the census.** Net migration keeps
+   adding to (or removing from) a birth cohort well into adulthood, and
+   INSEE revises cohorts as new data lands. INSEE's own estimate for
+   génération 2006 (France entière) moves 853k (2019) → 868k (2022) →
+   848k (2025) → 834k (2026) — it is *not* a constant. A frozen RP2022
+   count of ~872k is simply stale by 2026.
+
+2. **INSEE rebases the recent series with each release.** The 2026
+   release (situation démographique 2025) revised 2023-2025 *downward*
+   (e.g. génération 2006: 2025 went 856,820 → 848,207) as fresh census
+   data arrived. The census detail file cannot see these revisions; the
+   estimates series carries them.
+
+The consequence is concrete: for the current year (2026) the frozen
+RP2022 figure overstates the eligible 15-24 population by ~3-4% against
+INSEE's latest estimate. For a *taux de recours* (uptake rate) the
+population is the denominator, so a 3-4% over-count understates coverage
+by 3-4%. That is large enough to matter.
+
+`cohort-estimates` resolves this by **separating the two questions RP2022
+and the estimates each answer best**:
+
+| Question | Best source |
+|---|---|
+| *How many* people of génération G nationally, this year? | INSEE annual estimates (reality, revised) |
+| *Where* do they live, *what exact age* in the band, *which sex*, *which birth month*? | RP2022 (fine-grain, unmatched detail) |
+
+So we keep 100% of RP2022's spatial/age granularity and only replace the
+one number RP2022 is worst at — the up-to-date national cohort total.
+By construction the métropole+5DOM national total per `(year, génération,
+sex)` then equals the INSEE estimate exactly, while every ratio below it
+stays RP2022. TOM (Wallis, Nouvelle-Calédonie) are not in INSEE's France
+entière series, so they keep their own-census totals; their share of the
+national figure is small (~0.5%).
+
+**Residual limits.** Mayotte (976) is inside the anchored métropole+5DOM
+total but its *internal* level still comes from the 2017 POP1B aged
+forward, so its share of the corrected total is approximate. Projection
+years beyond the INSEE file (2027+) hold the last published cohort total.
+And the anchor is *national* — departmental divergence from the RP2022
+spatial pattern is not corrected (INSEE's departmental estimates are only
+published in 5-year age bands; a departmental anchor is a possible future
+refinement).
+
+## Territory scope follows pass-Culture eligibility
+
+The default territory set is the pass-Culture residency list, not "all
+of France". Eligible: métropole, the 5 DOM (Guadeloupe 971, Martinique
+972, Guyane 973, La Réunion 974, Mayotte 976), plus Saint-Pierre-et-
+Miquelon (975), Wallis-et-Futuna (986) and Nouvelle-Calédonie (988).
+
+Two consequences for the defaults:
+
+- **Polynésie française (987) is excluded.** It is not in the residency
+  list, yet it is large (~44k in the 15-24 band) — including it would
+  inflate the eligibility denominator by more than every other TOM
+  combined. Its parser is kept in `downloaders.py` but not synthesized
+  by default.
+- **Wallis-et-Futuna (986) is included.** Its only census (RP2023) is
+  newer than the 2022 base year; the aging offset is floored at 0 (used
+  as-is) rather than dropping the territory — a ≤1-year staleness on
+  ~11k people. Previously a negative offset silently skipped it.
+
+Known gap: **Saint-Pierre-et-Miquelon (975)** is eligible but has no
+machine-readable census source wired (~60 people per single-year
+cohort, <0.01% — negligible for now).
 
 ## MNAI over N4D for month-of-birth
 

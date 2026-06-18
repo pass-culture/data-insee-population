@@ -14,11 +14,14 @@ from rich.console import Console
 class Method(str, Enum):
     """Dept-level projection methods.
 
+    * ``cohort-estimates``: default -- cohort-stable re-anchored to INSEE's
+      latest annual population estimates (reality), RP2022 for fine-grain.
     * ``cohort-stable``: national cohort size times age-specific census
-      dept share. Default. Matches the INSEE spec doc.
+      dept share, frozen at RP2022. Matches the INSEE spec doc.
     * ``cohort-aging``: legacy -- age each census cohort in place.
     """
 
+    cohort_estimates = "cohort-estimates"
     cohort_stable = "cohort-stable"
     cohort_aging = "cohort-aging"
 
@@ -70,8 +73,8 @@ def population(
         True,
         "--include-tom/--no-tom",
         help=(
-            "Include TOM Pacifique (986/987/988): "
-            "Wallis-Futuna, Polynésie FR, Nouvelle-Calédonie"
+            "Include pass-Culture-eligible TOM (986, 988): "
+            "Wallis-Futuna, Nouvelle-Calédonie (Polynésie 987 excluded)"
         ),
     ),
     correct_student_mobility: bool = typer.Option(
@@ -89,12 +92,14 @@ def population(
         help="Monthly snapshots (12x more rows). Default: yearly at Jan 1st.",
     ),
     method: Method = typer.Option(  # noqa: B008
-        Method.cohort_stable,
+        Method.cohort_estimates,
         "--method",
         help=(
             "Dept-level projection method. "
-            "cohort-stable (default): national cohort x age-specific dept "
-            "share frozen at census (INSEE spec doc). "
+            "cohort-estimates (default): cohort-stable re-anchored to INSEE's "
+            "latest annual estimates, RP2022 for fine-grain. "
+            "cohort-stable: national cohort x age-specific dept share frozen "
+            "at RP2022 (INSEE spec doc). "
             "cohort-aging: legacy aging in place."
         ),
         case_sensitive=False,
@@ -179,7 +184,10 @@ def population(
     if include_mayotte:
         console.print("[dim]+ Including Mayotte (976)[/dim]")
     if include_tom:
-        console.print("[dim]+ Including TOM Pacifique (986/987/988)[/dim]")
+        console.print(
+            "[dim]+ Including eligible TOM: Wallis-Futuna (986), "
+            "Nouvelle-Calédonie (988)[/dim]"
+        )
 
     try:
         processor = PopulationProcessor(

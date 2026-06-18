@@ -3,7 +3,13 @@
 > Running log of validation results. Re-run the scripts in `validation/`
 > after regenerating the pipeline output to refresh these numbers.
 >
-> Last run: **2026-04-23 (c)** — re-run after aligning the base table
+> Last run: **2026-06-18 (d)** — `cohort-estimates` is now the default:
+> national cohort totals are anchored to INSEE annual estimates (POP3,
+> page 8999013), RP2022 keeps all fine-grain. Territory default aligned
+> to pass-Culture eligibility (Polynésie 987 dropped; Wallis 986 fixed).
+> See "cohort-estimates anchor" below. Earlier runs used `cohort-stable`.
+>
+> Prior run: **2026-04-23 (c)** — re-run after aligning the base table
 > with the INSEE spec doc: `age = year − ANAI` (birth-year age) and
 > raw Mayotte 2017 POP1B (no rescale). Pipeline:
 > `--method cohort-stable`, ages 15-24, 2019-2026,
@@ -51,6 +57,29 @@
 - MOBSCO correction magnitude has not been independently validated at EPCI level. An official sub-departmental age pyramid does not exist.
 
 ---
+
+## cohort-estimates anchor (2026-06-18 run)
+
+With `cohort-estimates` (new default), the métropole+5DOM national total
+per `(year, génération, sex)` matches INSEE's France entière estimate
+**exactly** — verified for génération 2006:
+
+| Year | Our métro+5DOM | INSEE FE (POP3) | Diff | Our total (+eligible TOM) |
+|---|---|---|---|---|
+| 2021 | 860,400 | 860,400 | 0 | 864,738 |
+| 2022 | 868,026 | 868,026 | 0 | 872,298 |
+| 2023 | 866,230 | 866,230 | 0 | 870,587 |
+| 2024 | 861,274 | 861,274 | 0 | 865,854 |
+| 2025 | 848,207 | 848,207 | 0 | 852,852 |
+| 2026 | 833,790 | 833,790 | 0 | 838,365 |
+| 2027 | 833,790 (held) | — | — | 838,334 |
+
+The old `cohort-stable` froze this cohort at **872,498** for every year.
+For 2026 that was ~**+34k (+4%)** above INSEE's rebased estimate — now
+removed. Cohorts that *grew* in INSEE's series (e.g. génération 2008,
+859k→876k) are corrected upward by the same mechanism. 2027 (beyond the
+INSEE file) holds the 2026 cohort total. Territory check: TOM in output =
+`['986','988']` (Wallis + Nouvelle-Calédonie); Polynésie 987 excluded.
 
 ## Method fidelity
 

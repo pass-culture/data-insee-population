@@ -19,12 +19,71 @@ balance) and degenerate to the census for Y = census_year.
 """
 
 __all__ = [
+    "CORRECT_DEPARTMENT_WITH_INSEE",
     "CREATE_PROJECTED_CANTON",
     "CREATE_PROJECTED_DEPARTMENT",
     "CREATE_PROJECTED_DEPARTMENT_COHORT_STABLE",
     "CREATE_PROJECTED_EPCI",
     "CREATE_PROJECTED_IRIS",
 ]
+
+# `cohort-estimates` method: anchor national cohort totals to INSEE's latest
+# annual estimates (table `insee_estimates`, France entière) while keeping the
+# RP2022 cohort-stable result for all spatial / age / sex distribution.
+#
+# Applied AFTER the frozen cohort-stable `population_department` is built and
+# BEFORE the geo levels (which join from it), so EPCI/canton/IRIS inherit the
+# correction automatically.
+#
+# For each (year, age, sex) we scale every métropole + 5 DOM row by
+#   factor = INSEE_FE(year, naissance = year - age, sex) / frozen_m5dom_total
+# so that, by construction, the corrected métropole+5DOM national total equals
+# the INSEE estimate. TOM rows ({tom_codes}) are left untouched — INSEE's France
+# entière does not cover them, they keep their own-census values. Projection
+# years beyond the INSEE file's last year reuse that last year's cohort total
+# (LEAST(year, {insee_last_year})), i.e. the cohort is held at its last observed
+# size. Years/cohorts/sex absent from INSEE keep the frozen value (factor = 1).
+CORRECT_DEPARTMENT_WITH_INSEE = """
+CREATE OR REPLACE TABLE population_department AS
+WITH frozen AS (
+    SELECT * FROM population_department
+),
+m5dom_totals AS (
+    -- Per snapshot month: in monthly mode each (year, age, sex) cohort has 12
+    -- rows (one per snapshot month), each carrying the full cohort total, so we
+    -- must group by month or the denominator would be 12x too large.
+    SELECT year, month, age, sex, SUM(population) AS m5_total
+    FROM frozen
+    WHERE department_code NOT IN ({tom_codes})
+    GROUP BY year, month, age, sex
+),
+factors AS (
+    SELECT
+        m.year,
+        m.month,
+        m.age,
+        m.sex,
+        COALESCE(ie.population / NULLIF(m.m5_total, 0), 1.0) AS factor
+    FROM m5dom_totals m
+    LEFT JOIN insee_estimates ie
+        ON ie.year = LEAST(m.year, {insee_last_year})
+       AND ie.naissance = m.year - m.age
+       AND ie.sex = m.sex
+)
+SELECT
+    f.* REPLACE (
+        f.population * (CASE WHEN f.department_code IN ({tom_codes})
+            THEN 1.0 ELSE COALESCE(fac.factor, 1.0) END) AS population,
+        f.population_low * (CASE WHEN f.department_code IN ({tom_codes})
+            THEN 1.0 ELSE COALESCE(fac.factor, 1.0) END) AS population_low,
+        f.population_high * (CASE WHEN f.department_code IN ({tom_codes})
+            THEN 1.0 ELSE COALESCE(fac.factor, 1.0) END) AS population_high
+    )
+FROM frozen f
+LEFT JOIN factors fac
+    ON fac.year = f.year AND fac.month = f.month
+   AND fac.age = f.age AND fac.sex = f.sex
+"""
 
 # Project department-level population by simple cohort aging.
 # For projection year Y, a person of age A was age A-(Y-census_year) at census.

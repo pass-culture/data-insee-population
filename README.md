@@ -15,22 +15,30 @@ splits it by month of birth and by sub-department geography:
 
 ```
 pop(year, month, age, sex, geo) =
-    census_aged(year, age, sex, dept)         [A]
-  × month_ratio(month | dept)                 [B]
-  × geo_ratio(geo | dept, age_band, sex)      [C]
+    national_total(year, génération, sex)      [A]
+  × dept_age_share(dept, age, sex)             [A']
+  × month_ratio(month | dept)                  [B]
+  × geo_ratio(geo | dept, age_band, sex)       [C]
 ```
 
-- **[A]** comes from the 2022 INDCVI census, shifted by
-  `year − census_year`. Mayotte is stitched in from its 2017 POP1B
-  census, aged forward the same way.
+- **[A]** (default `cohort-estimates`) comes from INSEE's latest annual
+  population estimates (POP3, France entière) — the up-to-date national
+  size of each birth génération, revised as INSEE rebases. `cohort-stable`
+  / `cohort-aging` instead freeze this at the 2022 INDCVI count.
+- **[A']** comes from the 2022 INDCVI census: which department, which
+  exact age in the band, which sex. Mayotte is stitched in from its 2017
+  POP1B census; eligible TOM (Wallis 986, Nouvelle-Calédonie 988) from
+  their own censuses.
 - **[B]** comes from MNAI in INDREG — month of birth of the living
   population. Regional fallback for departments < 700 k population.
 - **[C]** comes from INDCVI shares within each department, with a
   MOBSCO student-mobility correction for 15-19 and 20-24 bands.
 
-No mortality, no migration — this is a simple aging model, not a
-demographic projection. Projections are safe up to
-`census_year + min_age` (e.g. 2037 for 2022 + 15).
+So RP2022 supplies all fine-grain distribution while the national cohort
+total tracks INSEE reality (see [docs/design.md](docs/design.md) — *Why
+not RP2022 alone*). Projections are safe up to `census_year + min_age`
+(e.g. 2037 for 2022 + 15); years beyond INSEE's estimates hold the last
+published cohort total.
 
 ## Documentation
 

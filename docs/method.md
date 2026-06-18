@@ -32,8 +32,8 @@ Each row carries `population`, `confidence_pct`, `population_low`,
 | RP2022 INDCVI | [8647104](https://www.insee.fr/fr/statistiques/8647104) | Census base: population by dept × canton × commune × IRIS × age × sex |
 | RP2022 INDREG | [8590183](https://www.insee.fr/fr/statistiques/8590183) | Month-of-birth (MNAI) per region + per dept ≥ 700k pop |
 | Mayotte 2017 POP1B | [4199233](https://www.insee.fr/fr/statistiques/4199233) | Mayotte age pyramid (aged forward) |
-| Dept annual estimates (`estim-pop-dep-sexe-aq-*.xlsx`) | [8721456](https://www.insee.fr/fr/statistiques/8721456) | Per-dept × sex × age band annual anchor 1975→current year |
-| Dept × sex total estimates (`estim-pop-dep-sexe-gca-*.xlsx`) | [8721456](https://www.insee.fr/fr/statistiques/8721456) | Dept totals per sex per year |
+| INSEE annual estimates (POP3 `3_Pop1janv_age.xlsx`) | [8999013](https://www.insee.fr/fr/statistiques/8999013) | National cohort totals by année de naissance × sex × year (France entière), 1991→latest release. **Anchor for `cohort-estimates`** |
+| TOM Pacifique censuses (Wallis 2023, N.-Calédonie 2019) | STSEE / ISEE | Eligible TOM age pyramids (aged forward) |
 | N4D births | [8582142](https://www.insee.fr/fr/statistiques/8582142) | Monthly birth counts — **fallback** when MNAI is unavailable |
 | RP2022 MOBSCO | [8589945](https://www.insee.fr/fr/statistiques/8589945) | Student commuting for the 15-19 / 20-24 correction |
 | COG commune↔EPCI mapping | [COG](https://www.insee.fr/fr/information/2560452) | Sub-dept geography |
@@ -45,18 +45,38 @@ Each row carries `population`, `confidence_pct`, `population_low`,
    `IPONDI` weight summed. This becomes the `population` base table
    for the census year.
 
-2. **Add Mayotte.** INDCVI does not cover 976. Download POP1B (zip),
-   parse the wide commune sheet, sum communes to get a Mayotte-wide
-   age pyramid at 2017. Shift ages forward by `census_year - 2017` and
-   rescale per sex to match the current-year INSEE dept estimate.
-   Fallback path (used only if POP1B is unreachable): synthesise the
-   age distribution from the DOM quinquennal pyramid and apply the
-   current-year estimate as the total.
+2. **Add overseas territories not in INDCVI.** INDCVI covers métropole
+   + 4 DOM. The remaining pass-Culture-eligible territories are added
+   from their own censuses, aged forward to the census year:
+   - **Mayotte (976)** from POP1B 2017 (`age + (census_year − 2017)`).
+   - **Wallis-et-Futuna (986)** from RP2023, **Nouvelle-Calédonie
+     (988)** from RP2019. When a territory's census is newer than the
+     base year the aging offset is floored at 0 (used as-is).
+   - **Polynésie française (987)** is *not* in the pass-Culture
+     residency list and is excluded by default. Saint-Pierre-et-Miquelon
+     (975) is eligible but has no machine-readable source wired yet
+     (~60 people per single-year cohort — a known gap).
 
-3. **Project the cohorts.** Two methods are available via `--method`:
+3. **Project the cohorts.** Three methods are available via `--method`:
 
-   - **`cohort-stable`** (default, from the INSEE spec doc). For each
-     projection year `Y`, current age `A`, sex `S`, dept `D`:
+   - **`cohort-estimates`** (default). Builds the `cohort-stable`
+     result below, then **re-anchors national cohort totals to INSEE's
+     latest annual estimates** (POP3, France entière). For each
+     projection year `Y`, current age `A`, sex `S`, every métropole+5DOM
+     row is scaled by
+     ```
+     factor(Y, A, S) = INSEE_FE(Y, naissance = Y − A, S) / Σ_metro5dom pop(Y, A, S)
+     ```
+     so the corrected métropole+5DOM national total equals the INSEE
+     estimate per `(year, génération, sex)`, while RP2022 keeps **all**
+     spatial / age-within / sex / month distribution. TOM rows are left
+     untouched (INSEE's France entière does not cover them). Projection
+     years beyond the INSEE file's last year hold that last year's
+     cohort total. Falls back to `cohort-stable` if the estimates file
+     is unreachable.
+
+   - **`cohort-stable`** (from the INSEE spec doc, RP2022-frozen). For
+     each projection year `Y`, current age `A`, sex `S`, dept `D`:
      ```
      pop(Y, D, A, S) = effectif(Y − A, S) × pct_dept(D | S, A)
      ```
@@ -73,9 +93,10 @@ Each row carries `population`, `confidence_pct`, `population_low`,
      `A − (Y − census_year)` in the same dept: each cohort is aged
      forward while staying in place.
 
-   Both methods preserve national cohort totals and degenerate to the
-   census at `Y = census_year`. They differ in how the geographic
-   distribution evolves for `Y ≠ census_year`:
+   `cohort-stable` and `cohort-aging` both preserve the RP2022 national
+   cohort total (no mortality / migration) and degenerate to the census
+   at `Y = census_year`; they differ only in how the geographic
+   distribution evolves:
    - `cohort-stable` keeps *age-specific* dept shares constant, so the
      share of 18-year-olds in dept D is the same every year. This
      implicitly captures post-bac migration (18-year-old distribution
@@ -84,7 +105,13 @@ Each row carries `population`, `confidence_pct`, `population_low`,
      the 2022 14-year-old distribution becomes the 2026 18-year-old
      distribution.
 
-   Both methods are valid for `Y ≤ census_year + min_age`.
+   `cohort-estimates` adds the only source of *temporal reality*: it
+   replaces the frozen national total with INSEE's annual estimate, so
+   a cohort's national size now changes year to year (and is revised as
+   INSEE rebases the recent series). See
+   [`design.md`](./design.md#why-not-rp2022-alone) for why this matters.
+
+   All methods are valid for `Y ≤ census_year + min_age`.
 
 4. **Month-of-birth distribution.** Load INDREG and compute, per
    department, the share of population born in each month:
@@ -119,12 +146,15 @@ Each row carries `population`, `confidence_pct`, `population_low`,
 ## Running the pipeline
 
 ```bash
-# Default: cohort-stable, 2019-2027, all ages
+# Default: cohort-estimates (INSEE-anchored), 2019-2027, all ages
 uv run insee-population population
 
 # Narrow to ages 15-24
 uv run insee-population population --min-age 15 --max-age 24 \
     --start-year 2019 --end-year 2027 -o data/output
+
+# Use the RP2022-frozen total instead of the INSEE anchor
+uv run insee-population population --method cohort-stable ...
 
 # Switch to the legacy cohort-aging method
 uv run insee-population population --method cohort-aging ...
