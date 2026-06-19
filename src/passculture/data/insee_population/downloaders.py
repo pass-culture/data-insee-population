@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import io
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
 import pandas as pd
@@ -27,6 +28,7 @@ from passculture.data.insee_population.constants import (
     DEPARTMENTS_TOM,
     INDCVI_URLS,
     INDREG_URLS,
+    INSEE_ESTIMATES_URL,
     IRIS_SENTINEL_NO_GEO,
     MAYOTTE_CENSUS_YEAR,
     MAYOTTE_POP1B_MEMBER,
@@ -56,20 +58,36 @@ _VALID_DEPARTMENTS = (
 DOWNLOAD_TIMEOUT = 600  # 10 minutes for large census files
 ESTIMATES_TIMEOUT = 120  # 2 minutes for smaller files
 CHUNK_SIZE = 131072  # 128KB chunks
+DOWNLOAD_RETRIES = 3  # retries for truncated/dropped large downloads
+
+# Parquet files start and end with this 4-byte magic; used to detect the
+# silently truncated downloads INSEE's chunked/gzip transfer can produce.
+_PARQUET_MAGIC = b"PAR1"
 
 
 def _cached_parquet(url: str, filename: str, cache_dir: Path | None) -> Path:
-    """Return a local path to the parquet at ``url``, caching by filename."""
+    """Return a local path to the parquet at ``url``, caching by filename.
+
+    A cached file that fails parquet validation (e.g. a truncated download
+    from a previous interrupted run) is discarded and re-fetched rather than
+    reused.
+    """
     if cache_dir:
         cache_dir.mkdir(parents=True, exist_ok=True)
         parquet_path = cache_dir / filename
         if parquet_path.exists():
-            logger.debug("Using cached: {}", parquet_path)
-            return parquet_path
+            if _is_valid_parquet(parquet_path):
+                logger.debug("Using cached: {}", parquet_path)
+                return parquet_path
+            logger.warning(
+                "Cached {} is corrupt (bad parquet magic); re-downloading",
+                parquet_path,
+            )
+            parquet_path.unlink()
     else:
         parquet_path = Path(tempfile.mkdtemp()) / filename
 
-    _download_file(url, parquet_path)
+    _download_file(url, parquet_path, validate=_is_valid_parquet)
     return parquet_path
 
 
@@ -103,6 +121,94 @@ def download_indreg(year: int, cache_dir: Path | None) -> Path:
 def download_mobsco(cache_dir: Path | None) -> Path:
     """Download MOBSCO (student commuting) parquet file."""
     return _cached_parquet(MOBSCO_URL, "mobsco_2022.parquet", cache_dir)
+
+
+# -----------------------------------------------------------------------------
+# INSEE annual population estimates (POP3) — anchor for cohort-estimates method
+# -----------------------------------------------------------------------------
+
+
+def download_insee_estimates(cache_dir: Path | None = None) -> pd.DataFrame:
+    """Download INSEE annual population estimates by année de naissance and sex.
+
+    Parses POP3 of the "situation démographique" series (one sheet per year,
+    France entière = métropole + 5 DOM). Returns a DataFrame with columns
+    ``year, naissance, sex, population`` where ``sex`` is ``male``/``female``
+    and ``naissance`` is the birth year (génération). Used to anchor national
+    cohort totals to INSEE's latest estimate. Returns an empty DataFrame when
+    the file cannot be fetched/parsed so callers can fall back to RP2022-frozen.
+    """
+    cache_path = cache_dir / "insee_estimates_pop3.parquet" if cache_dir else None
+    if cache_path and cache_path.exists():
+        logger.debug("Using cached INSEE estimates: {}", cache_path)
+        return pd.read_parquet(cache_path)
+
+    try:
+        logger.info(
+            "Downloading INSEE population estimates (POP3) from {}...",
+            INSEE_ESTIMATES_URL,
+        )
+        response = requests.get(INSEE_ESTIMATES_URL, timeout=ESTIMATES_TIMEOUT)
+        response.raise_for_status()
+        df = _parse_pop3(response.content)
+    except Exception as e:
+        logger.warning("Could not fetch/parse INSEE estimates: {}", e)
+        return pd.DataFrame()
+
+    if df.empty:
+        return df
+
+    if cache_path and cache_dir:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        df.to_parquet(cache_path, index=False)
+
+    return df
+
+
+def _parse_pop3(xlsx_bytes: bytes) -> pd.DataFrame:
+    """Parse the POP3 workbook (one sheet per year) into a long table.
+
+    Sheet layout (header on row 4, data from row 6):
+      col 0: Année de naissance (int)
+      col 1: Âge en années révolues
+      cols 2-4: France métropolitaine (Ensemble, Hommes, Femmes)
+      cols 5-7: France entière       (Ensemble, Hommes, Femmes)
+    We keep France entière Hommes (col 6) and Femmes (col 7) per génération.
+    """
+    import openpyxl
+
+    wb = openpyxl.load_workbook(io.BytesIO(xlsx_bytes), read_only=True, data_only=True)
+    rows: list[dict] = []
+    for sheet in wb.sheetnames:
+        if not (len(sheet) == 4 and sheet.isdigit()):
+            continue
+        year = int(sheet)
+        for row in wb[sheet].iter_rows(min_row=5, values_only=True):
+            naissance = row[0]
+            if not isinstance(naissance, int):
+                continue
+            male, female = row[6], row[7]
+            nums = (int, float)
+            if not isinstance(male, nums) or not isinstance(female, nums):
+                continue
+            rows.append(
+                {
+                    "year": year,
+                    "naissance": naissance,
+                    "sex": "male",
+                    "population": float(male),
+                }
+            )
+            rows.append(
+                {
+                    "year": year,
+                    "naissance": naissance,
+                    "sex": "female",
+                    "population": float(female),
+                }
+            )
+    wb.close()
+    return pd.DataFrame(rows)
 
 
 # -----------------------------------------------------------------------------
@@ -430,20 +536,94 @@ def _safe_float(value: object) -> float:
 # -----------------------------------------------------------------------------
 
 
-def _download_file(url: str, dest: Path) -> None:
-    """Download file with progress indicator."""
+def _is_valid_parquet(path: Path) -> bool:
+    """Return True if ``path`` looks like a complete parquet file.
+
+    A parquet file begins and ends with the 4-byte ``PAR1`` magic. INSEE
+    serves these files gzip-encoded with chunked transfer and no
+    ``Content-Length``, so a dropped connection yields a silently truncated
+    file with no size to validate against — checking the trailing magic is
+    the only reliable completeness signal.
+    """
+    try:
+        if path.stat().st_size < 8:
+            return False
+        with open(path, "rb") as f:
+            if f.read(4) != _PARQUET_MAGIC:
+                return False
+            f.seek(-4, io.SEEK_END)
+            return f.read(4) == _PARQUET_MAGIC
+    except OSError:
+        return False
+
+
+def _download_file(
+    url: str,
+    dest: Path,
+    validate: Callable[[Path], bool] | None = None,
+    retries: int = DOWNLOAD_RETRIES,
+) -> None:
+    """Download a file atomically, with validation and retry.
+
+    Streams to a sibling ``.part`` file and only renames into ``dest`` once
+    the transfer completes, the byte count matches ``Content-Length`` (when
+    advertised), and ``validate`` (if given) accepts the file. An interrupted,
+    truncated, or otherwise invalid download therefore never leaves a corrupt
+    file at the cache path for a later run to reuse. Transient failures are
+    retried up to ``retries`` times.
+    """
     logger.info("Downloading from {}...", url)
+    tmp = dest.with_suffix(dest.suffix + ".part")
+
+    last_error: Exception | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            written = _stream_to_file(url, tmp)
+            if validate and not validate(tmp):
+                raise OSError(
+                    f"Invalid/truncated download from {url} "
+                    f"({written:,} bytes, failed validation)"
+                )
+            tmp.replace(dest)
+            return
+        except (requests.RequestException, OSError) as e:
+            last_error = e
+            tmp.unlink(missing_ok=True)
+            logger.warning(
+                "Download attempt {}/{} failed for {}: {}",
+                attempt,
+                retries,
+                url,
+                e,
+            )
+
+    raise OSError(f"Failed to download {url} after {retries} attempts") from last_error
+
+
+def _stream_to_file(url: str, tmp: Path) -> int:
+    """Stream ``url`` into ``tmp``, returning the number of bytes written.
+
+    Enforces ``Content-Length`` when the server advertises it (INSEE's large
+    census files do not — see :func:`_is_valid_parquet`).
+    """
     response = requests.get(url, stream=True, timeout=DOWNLOAD_TIMEOUT)
     response.raise_for_status()
 
     total = int(response.headers.get("content-length", 0))
-
+    written = 0
     with Progress(transient=True) as progress:
         task = progress.add_task("Downloading", total=total or None)
-        with open(dest, "wb") as f:
+        with open(tmp, "wb") as f:
             for chunk in response.iter_content(chunk_size=CHUNK_SIZE):
                 f.write(chunk)
+                written += len(chunk)
                 progress.advance(task, len(chunk))
+
+    if total and written != total:
+        raise OSError(
+            f"Truncated download from {url}: got {written} bytes, expected {total}"
+        )
+    return written
 
 
 # -----------------------------------------------------------------------------
@@ -741,14 +921,22 @@ def _parse_pyf_csv(csv_bytes: bytes) -> pd.DataFrame:
 def synthesize_tom_population(
     year: int,
     cache_dir: Path | None = None,
+    departments: list[str] | None = None,
 ) -> pd.DataFrame:
-    """Build TOM Pacifique (986/987/988) population rows for the given year.
+    """Build TOM Pacifique population rows for the given year.
 
-    Downloads each territory's census (WLF 2023, PYF 2019, NCL 2019) and
-    ages the population forward to ``year`` by shifting individual ages.
-    Returns an empty DataFrame if all three sources fail.
+    Downloads each eligible territory's census and ages the population to
+    ``year`` by shifting individual ages. ``departments`` selects which TOM to
+    include (default: ``DEPARTMENTS_TOM`` — the pass-Culture-eligible set, i.e.
+    Wallis-Futuna 986 + Nouvelle-Calédonie 988; Polynésie 987 is excluded).
+    Returns an empty DataFrame if all selected sources fail.
+
+    When a territory's census is *newer* than ``year`` (e.g. Wallis 2023 vs a
+    2022 base) the aging offset is floored at 0 — the census is used as-is
+    rather than dropping the whole territory (≤1 year stale for ~11k people).
     """
-    logger.info("Adding TOM Pacifique (986/987/988) for year {}...", year)
+    allowed = set(departments) if departments is not None else set(DEPARTMENTS_TOM)
+    logger.info("Adding TOM Pacifique {} for year {}...", sorted(allowed), year)
 
     sources: list[tuple[str, str, int, object]] = [
         ("986", "Wallis-Futuna", WLF_CENSUS_YEAR, download_wlf_census),
@@ -758,16 +946,9 @@ def synthesize_tom_population(
 
     parts: list[pd.DataFrame] = []
     for dept, name, census_year, downloader in sources:
-        offset = year - census_year
-        if offset < 0:
-            logger.warning(
-                "  {} ({}): requested year {} before census year {}; skipping",
-                dept,
-                name,
-                year,
-                census_year,
-            )
+        if dept not in allowed:
             continue
+        offset = max(0, year - census_year)
 
         pop = downloader(cache_dir)
         if pop.empty:

@@ -43,6 +43,23 @@ INDREG_URLS = {
 # month-of-birth distribution for those departments.
 MNAI_MIN_DEPT_POPULATION = 700_000
 
+# INSEE annual population estimates by sex and single-year age (POP3 of the
+# "situation démographique" series). Gives population at 1 January by année de
+# naissance, France entière (métropole + 5 DOM), updated each release and
+# revised for recent years as new census data lands. Used by the
+# `cohort-estimates` projection method to anchor national cohort totals to the
+# latest reality, while RP2022 keeps all fine-grain distribution.
+#
+# Bump this to the newest release each year (page id changes); the series
+# inside covers ~1991→release-year. Current: situation démographique 2025
+# (carries 1 Jan 2026 + revised 2023-2025).
+INSEE_ESTIMATES_URL = (
+    "https://www.insee.fr/fr/statistiques/fichier/8999013/3_Pop1janv_age.xlsx"
+)
+# Last calendar year present in the file above (hold this cohort total for any
+# projection year beyond it).
+INSEE_ESTIMATES_LAST_YEAR = 2026
+
 # Mayotte 2017 census (POP1B: population by sex and age). Page 4199233.
 # INSEE publishes the full POP1B (+other tables) as a single zip archive.
 # We extract the POP1B xls and sum communes to get the Mayotte-wide pyramid.
@@ -114,12 +131,13 @@ DEPARTMENTS_DOM = [
 # 976 (Mayotte) has separate census - not in standard INDCVI files
 DEPARTMENTS_MAYOTTE = ["976"]
 DEPARTMENTS_COM = ["975", "977", "978"]  # Saint-Pierre, Saint-Barth, Saint-Martin
-# TOM Pacifique: separate censuses from STSEE/ISEE/data.gouv.fr
-DEPARTMENTS_TOM = [
-    "986",
-    "987",
-    "988",
-]  # Wallis-Futuna, Polynésie FR, Nouvelle-Calédonie
+# TOM Pacifique eligible for pass Culture residency: Wallis-et-Futuna (986) and
+# Nouvelle-Calédonie (988). Polynésie française (987) is NOT in the pass Culture
+# residency list, so it is excluded from the default territory set (its parser
+# in downloaders.py is kept for reference but not synthesized by default).
+# Saint-Pierre-et-Miquelon (975) is also eligible but has no machine-readable
+# census source wired yet (~60 people per single-year cohort — a known gap).
+DEPARTMENTS_TOM = ["986", "988"]  # Wallis-Futuna, Nouvelle-Calédonie
 
 # Wallis-et-Futuna 2023 census (STSEE) — population by sex and 5-year age band
 WLF_CENSUS_YEAR = 2023

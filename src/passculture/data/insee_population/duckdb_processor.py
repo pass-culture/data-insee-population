@@ -36,6 +36,7 @@ from passculture.data.insee_population.constants import (
 )
 from passculture.data.insee_population.downloaders import (
     download_indcvi,
+    download_insee_estimates,
     download_mnai_birth_distribution,
     download_mobsco,
     synthesize_mayotte_population,
@@ -97,7 +98,7 @@ class PopulationProcessor:
         include_tom: bool = True,
         correct_student_mobility: bool = True,
         monthly: bool = False,
-        method: ProjectionMethod = "cohort-stable",
+        method: ProjectionMethod = "cohort-estimates",
         cache_dir: str | Path | None = "data/cache",
     ) -> None:
         """Initialize processor with filtering options."""
@@ -232,6 +233,19 @@ class PopulationProcessor:
 
             logger.info("Step 2d: Correcting IRIS geo ratios for student mobility...")
             apply_student_mobility_correction_iris(self.conn, mobsco_path)
+
+        # 2e. cohort-estimates: load INSEE annual estimates to anchor totals.
+        if self.method == "cohort-estimates":
+            logger.info("Step 2e: Loading INSEE population estimates (anchor)...")
+            insee_df = download_insee_estimates(self.cache_dir)
+            if insee_df.empty:
+                logger.warning(
+                    "INSEE estimates unavailable — cohort-estimates will fall "
+                    "back to frozen cohort-stable totals."
+                )
+            else:
+                self._register_dataframe("insee_estimates_df", insee_df)
+                self._execute(sql.REGISTER_INSEE_ESTIMATES)
 
         # 3. Project multi-year at all levels
         logger.info("Step 3: Projecting population (method={})...", self.method)

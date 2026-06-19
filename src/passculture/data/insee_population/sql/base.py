@@ -6,6 +6,7 @@ __all__ = [
     "INSERT_TOM",
     "REGISTER_CANTON_WEIGHTS",
     "REGISTER_COMMUNE_EPCI",
+    "REGISTER_INSEE_ESTIMATES",
     "REGISTER_MONTHLY_BIRTHS",
 ]
 
@@ -55,4 +56,8 @@ INSERT_TOM = "INSERT INTO population SELECT * FROM tom_df"
 
 REGISTER_MONTHLY_BIRTHS = (
     "CREATE OR REPLACE TABLE monthly_births AS SELECT * FROM monthly_births_df"
+)
+
+REGISTER_INSEE_ESTIMATES = (
+    "CREATE OR REPLACE TABLE insee_estimates AS SELECT * FROM insee_estimates_df"
 )

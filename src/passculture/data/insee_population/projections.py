@@ -24,6 +24,8 @@ from passculture.data.insee_population.constants import (
     CI_EXTRA_EPCI,
     CI_EXTRA_IRIS,
     CI_PER_YEAR,
+    DEPARTMENTS_TOM,
+    INSEE_ESTIMATES_LAST_YEAR,
     IRIS_SENTINEL_MASKED_SUFFIX,
     IRIS_SENTINEL_NO_GEO,
     MAX_AGE,
@@ -37,7 +39,7 @@ from passculture.data.insee_population.constants import (
 if TYPE_CHECKING:
     import duckdb
 
-ProjectionMethod = Literal["cohort-stable", "cohort-aging"]
+ProjectionMethod = Literal["cohort-estimates", "cohort-stable", "cohort-aging"]
 
 
 def _build_age_band_cases() -> str:
@@ -108,6 +110,42 @@ def compute_geo_ratios(conn: duckdb.DuckDBPyConnection, level: str) -> None:
     )
 
 
+def _apply_insee_anchor(conn: duckdb.DuckDBPyConnection) -> None:
+    """Rescale métropole+5DOM dept totals to INSEE estimates (cohort-estimates).
+
+    No-op (with a warning) if the ``insee_estimates`` table is absent, so the
+    pipeline degrades to the frozen cohort-stable result rather than failing.
+    """
+    has_estimates = conn.execute(
+        "SELECT COUNT(*) FROM information_schema.tables "
+        "WHERE table_name = 'insee_estimates'"
+    ).fetchone()[0]
+    if not has_estimates:
+        logger.warning(
+            "cohort-estimates requested but insee_estimates table is missing; "
+            "falling back to frozen cohort-stable totals."
+        )
+        return
+
+    tom_codes = ", ".join(f"'{d}'" for d in DEPARTMENTS_TOM)
+    total_sql = "SELECT SUM(population) FROM population_department"
+    before = conn.execute(total_sql).fetchone()[0]
+    conn.execute(
+        sql.CORRECT_DEPARTMENT_WITH_INSEE.format(
+            tom_codes=tom_codes,
+            insee_last_year=INSEE_ESTIMATES_LAST_YEAR,
+        )
+    )
+    after = conn.execute(total_sql).fetchone()[0]
+    if before:
+        logger.debug(
+            "  INSEE anchor: total population {:,.0f} -> {:,.0f} ({:+.2f}%)",
+            before,
+            after,
+            100 * (after - before) / before,
+        )
+
+
 def project_multi_year(
     conn: duckdb.DuckDBPyConnection,
     min_age: int,
@@ -120,13 +158,18 @@ def project_multi_year(
 ) -> None:
     """Project multi-year population at all geographic levels.
 
-    Two dept-level methods (see ``sql/projections.py`` docstring for the
+    Three dept-level methods (see ``sql/projections.py`` docstring for the
     algebra):
 
-    * ``cohort-stable`` (default, from the INSEE spec doc): national
-      cohort totals times age-specific dept shares frozen at census.
-      Renews the age-specific distribution each year, implicitly
-      capturing post-bac migration.
+    * ``cohort-estimates`` (default): the ``cohort-stable`` result with
+      national cohort totals re-anchored to INSEE's latest annual estimates
+      (table ``insee_estimates``) per (year, génération, sex), for métropole
+      + 5 DOM. RP2022 keeps all spatial/age/sex distribution; TOM keep their
+      own-census values. Requires ``insee_estimates`` to be registered.
+    * ``cohort-stable`` (from the INSEE spec doc): national cohort totals
+      times age-specific dept shares frozen at census. Renews the
+      age-specific distribution each year, implicitly capturing post-bac
+      migration.
     * ``cohort-aging`` (legacy): ages each census cohort in place.
 
     Default mode (yearly): one snapshot at January 1st per year, exploded
@@ -191,14 +234,15 @@ def project_multi_year(
         logger.debug("{} done ({:.1f}s)", label, elapsed)
         return result
 
-    if method == "cohort-stable":
+    # cohort-estimates builds the cohort-stable base then re-anchors it.
+    if method in ("cohort-stable", "cohort-estimates"):
         dept_template = sql.CREATE_PROJECTED_DEPARTMENT_COHORT_STABLE
     elif method == "cohort-aging":
         dept_template = sql.CREATE_PROJECTED_DEPARTMENT
     else:
         raise ValueError(
-            f"Unknown projection method: {method!r}. "
-            "Expected 'cohort-stable' or 'cohort-aging'."
+            f"Unknown projection method: {method!r}. Expected "
+            "'cohort-estimates', 'cohort-stable', or 'cohort-aging'."
         )
 
     _timed(
@@ -217,6 +261,11 @@ def project_multi_year(
 
     dept_rows = conn.execute("SELECT COUNT(*) FROM population_department").fetchone()[0]
     logger.debug("  Department (compact): {:,} rows", dept_rows)
+
+    # cohort-estimates: re-anchor métropole+5DOM totals to INSEE estimates.
+    # Done before the geo joins below so EPCI/canton/IRIS inherit the rescale.
+    if method == "cohort-estimates":
+        _apply_insee_anchor(conn)
 
     # Geo levels — join from compact department table (before birth-month
     # explosion) so the joins operate on 12x fewer rows.
