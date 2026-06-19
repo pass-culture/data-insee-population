@@ -153,22 +153,6 @@ How each is sourced:
 | Wallis-et-Futuna (986) | RP2023 |
 | Nouvelle-Calédonie (988) | RP2019 |
 
-Two deliberate exclusions / fixes:
-
-- **Polynésie française (987) is excluded.** It is not in the residency
-  list, yet large (~44k in the 15-24 band) — including it would inflate
-  the eligibility denominator more than every other TOM combined. Its
-  parser is kept in `downloaders.py` but not synthesized by default.
-- **Wallis-et-Futuna (986) is included.** Its only census (RP2023) is
-  newer than the 2022 base year; the aging offset is floored at 0 (used
-  as-is) rather than dropping the territory — previously a negative
-  offset silently skipped it.
-
-**Anchor scope.** Mayotte (976), a DOM, is inside INSEE's France entière
-estimates and is re-anchored under `cohort-estimates`. The COM/TOM (975,
-986, 988) are *not* in France entière, so they keep their own-census
-totals and are excluded from the anchor denominator.
-
 ## MNAI over N4D for month-of-birth
 
 Two options for the `birth_month` distribution:
