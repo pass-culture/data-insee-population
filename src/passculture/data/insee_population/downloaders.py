@@ -39,6 +39,10 @@ from passculture.data.insee_population.constants import (
     NCL_CENSUS_YEAR,
     PYF_CENSUS_URL,
     PYF_CENSUS_YEAR,
+    SPM_CENSUS_YEAR,
+    SPM_CODGEO_PREFIX,
+    SPM_POP1B_MEMBER,
+    SPM_POP1B_URL,
     WLF_CENSUS_URL,
     WLF_CENSUS_YEAR,
 )
@@ -391,7 +395,7 @@ def download_mayotte_pop1b(
         response = requests.get(MAYOTTE_POP1B_URL, timeout=ESTIMATES_TIMEOUT)
         response.raise_for_status()
         xls_bytes = _extract_zip_member(response.content, MAYOTTE_POP1B_MEMBER)
-        df = _parse_mayotte_pop1b_wide(xls_bytes)
+        df = _parse_pop1b_wide(xls_bytes)
     except Exception as e:
         logger.warning("Could not fetch Mayotte POP1B: {}", e)
         return pd.DataFrame()
@@ -421,10 +425,12 @@ def _extract_zip_member(zip_bytes: bytes, member_name: str) -> bytes:
             return f.read()
 
 
-def _parse_mayotte_pop1b_wide(xls_bytes: bytes) -> pd.DataFrame:
+def _parse_pop1b_wide(
+    xls_bytes: bytes, codgeo_prefix: str | None = None
+) -> pd.DataFrame:
     """Parse the wide POP1B layout: one row per commune, columns per (sex, age).
 
-    Header layout (COM sheet):
+    Header layout (commune sheet):
       row 5, col 1: ``SEXE``
       row 5, cols 2-102: ``1`` (male), cols 103-203: ``2`` (female)
       row 6, col 1: ``AGED100``
@@ -433,7 +439,10 @@ def _parse_mayotte_pop1b_wide(xls_bytes: bytes) -> pd.DataFrame:
       row 10, col 0: ``CODGEO``
       rows 11+: commune code followed by 202 population counts
 
-    We sum across all communes to get the Mayotte-wide age pyramid.
+    Sums across communes to get a territory-wide age pyramid. ``codgeo_prefix``
+    restricts to communes whose CODGEO starts with it (e.g. ``"975"`` for
+    Saint-Pierre-et-Miquelon when the file bundles several collectivités);
+    ``None`` sums every commune (Mayotte's file is Mayotte-only).
     """
     xls = pd.ExcelFile(io.BytesIO(xls_bytes))
     candidates = [s for s in xls.sheet_names if s.upper().startswith("COM")]
@@ -444,14 +453,19 @@ def _parse_mayotte_pop1b_wide(xls_bytes: bytes) -> pd.DataFrame:
             raw = pd.read_excel(xls, sheet_name=sheet, header=None)
         except Exception:
             continue
-        parsed = _extract_pop1b_wide_rows(raw)
+        parsed = _extract_pop1b_wide_rows(raw, codgeo_prefix)
         if not parsed.empty:
             return parsed
     return pd.DataFrame()
 
 
-def _extract_pop1b_wide_rows(raw: pd.DataFrame) -> pd.DataFrame:
-    """Extract (age, sex, population) from the wide POP1B commune table."""
+def _extract_pop1b_wide_rows(
+    raw: pd.DataFrame, codgeo_prefix: str | None = None
+) -> pd.DataFrame:
+    """Extract (age, sex, population) from the wide POP1B commune table.
+
+    ``codgeo_prefix`` restricts the summed commune rows to matching CODGEO.
+    """
     # Locate header rows by scanning the first ~12 rows.
     sexe_row = aged_row = codgeo_row = None
     for i in range(min(len(raw), 15)):
@@ -472,22 +486,25 @@ def _extract_pop1b_wide_rows(raw: pd.DataFrame) -> pd.DataFrame:
     # Build a (sex, age, col_index) map across all columns 2+.
     col_map: list[tuple[str, int, int]] = []
     for col in range(2, raw.shape[1]):
-        sex_raw = str(sex_header[col]).strip()
-        age_raw = age_header[col]
-        age = _parse_age_label(age_raw)
-        if age is None or sex_raw not in {"1", "2"}:
+        sex_code = _normalize_sex_code(sex_header[col])
+        age = _parse_age_label(age_header[col])
+        if age is None or sex_code not in {"1", "2"}:
             continue
-        sex = "male" if sex_raw == "1" else "female"
+        sex = "male" if sex_code == "1" else "female"
         col_map.append((sex, age, col))
 
     if not col_map:
         return pd.DataFrame()
 
-    # Sum population across commune rows.
+    # Sum population across commune rows (optionally filtered by CODGEO prefix).
     totals: dict[tuple[str, int], float] = {}
     for i in range(codgeo_row + 1, len(raw)):
         codgeo = raw.iloc[i, 0]
         if pd.isna(codgeo):
+            continue
+        if codgeo_prefix is not None and not str(codgeo).strip().startswith(
+            codgeo_prefix
+        ):
             continue
         for sex, age, col in col_map:
             value = _safe_float(raw.iloc[i, col])
@@ -500,6 +517,19 @@ def _extract_pop1b_wide_rows(raw: pd.DataFrame) -> pd.DataFrame:
         if pop > 0
     ]
     return pd.DataFrame(rows).sort_values(["age", "sex"]).reset_index(drop=True)
+
+
+def _normalize_sex_code(raw: object) -> str:
+    """Normalise an INSEE SEXE header cell to ``"1"`` / ``"2"``.
+
+    Tolerates text (``"1"``) and numeric (``1`` / ``1.0``) typing — Excel/parser
+    type inference can turn the published string codes into floats.
+    """
+    text = str(raw).strip()
+    try:
+        return str(int(float(text)))
+    except (ValueError, TypeError):
+        return text
 
 
 def _parse_age_label(raw: object) -> int | None:
@@ -681,6 +711,88 @@ def synthesize_mayotte_population(
     df = pd.DataFrame(rows)
     logger.debug(
         "  Added {} Mayotte rows ({:,.0f} population)", len(df), df["population"].sum()
+    )
+    return df
+
+
+# -----------------------------------------------------------------------------
+# Saint-Pierre-et-Miquelon (975) 2022 census (POP1B)
+# -----------------------------------------------------------------------------
+
+
+def download_spm_pop1b(cache_dir: Path | None = None) -> pd.DataFrame:
+    """Download Saint-Pierre-et-Miquelon 2022 census (POP1B: sex x age).
+
+    INSEE ships POP1B for all collectivités d'outre-mer in one zip-bundled
+    workbook; we keep only the 975 communes. Returns a DataFrame with columns
+    ``age, sex, population``, or empty if the file cannot be fetched/parsed.
+    """
+    cache_path = cache_dir / "spm_pop1b_2022.parquet" if cache_dir else None
+    if cache_path and cache_path.exists():
+        logger.debug("Using cached SPM POP1B: {}", cache_path)
+        return pd.read_parquet(cache_path)
+
+    try:
+        logger.info(
+            "Downloading Saint-Pierre-et-Miquelon 2022 POP1B from {}", SPM_POP1B_URL
+        )
+        response = requests.get(SPM_POP1B_URL, timeout=ESTIMATES_TIMEOUT)
+        response.raise_for_status()
+        xls_bytes = _extract_zip_member(response.content, SPM_POP1B_MEMBER)
+        df = _parse_pop1b_wide(xls_bytes, codgeo_prefix=SPM_CODGEO_PREFIX)
+    except Exception as e:
+        logger.warning("Could not fetch SPM POP1B: {}", e)
+        return pd.DataFrame()
+
+    if df.empty:
+        return df
+    if cache_path and cache_dir:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        df.to_parquet(cache_path, index=False)
+    return df
+
+
+def synthesize_spm_population(
+    year: int,
+    cache_dir: Path | None = None,
+) -> pd.DataFrame:
+    """Build Saint-Pierre-et-Miquelon (975) population rows for ``year``.
+
+    Loads the SPM 2022 POP1B census and ages it forward by
+    ``max(0, year - SPM_CENSUS_YEAR)``. SPM is a COM (not in INSEE's France
+    entière estimates), so under ``cohort-estimates`` these rows are kept as-is,
+    not re-anchored.
+    """
+    logger.info("Adding Saint-Pierre-et-Miquelon (975) for year {}...", year)
+
+    pop1b = download_spm_pop1b(cache_dir)
+    if pop1b.empty:
+        logger.warning("  Could not load SPM POP1B, skipping Saint-Pierre")
+        return pd.DataFrame()
+
+    aged = pop1b.copy()
+    aged["age"] = aged["age"] + max(0, year - SPM_CENSUS_YEAR)
+    aged = aged[aged["population"] > 0]
+    if aged.empty:
+        return pd.DataFrame()
+
+    rows: list[dict] = [
+        {
+            "year": year,
+            "department_code": "975",
+            "region_code": "975",
+            "canton_code": "9750",
+            "commune_code": "",
+            "iris_code": IRIS_SENTINEL_NO_GEO,
+            "age": int(r["age"]),
+            "sex": r["sex"],
+            "population": float(r["population"]),
+        }
+        for _, r in aged.iterrows()
+    ]
+    df = pd.DataFrame(rows)
+    logger.debug(
+        "  Added {} SPM rows ({:,.0f} population)", len(df), df["population"].sum()
     )
     return df
 

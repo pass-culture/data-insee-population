@@ -138,10 +138,36 @@ refinement).
 
 ## Territory scope follows pass-Culture eligibility
 
-The default territory set is the pass-Culture residency list.
-Eligible: métropole, the 5 DOM (Guadeloupe 971, Martinique
+The default territory set is the pass-Culture residency list, not "all
+of France". Eligible: métropole, the 5 DOM (Guadeloupe 971, Martinique
 972, Guyane 973, La Réunion 974, Mayotte 976), plus Saint-Pierre-et-
 Miquelon (975), Wallis-et-Futuna (986) and Nouvelle-Calédonie (988).
+
+How each is sourced:
+
+| Territory | Source |
+|---|---|
+| Métropole + 4 DOM (971-974) | INDCVI 2022 |
+| Mayotte (976) | POP1B 2017 aged forward |
+| Saint-Pierre-et-Miquelon (975) | POP1B 2022 (`C.O.M.` workbook, 975 communes) |
+| Wallis-et-Futuna (986) | RP2023 |
+| Nouvelle-Calédonie (988) | RP2019 |
+
+Two deliberate exclusions / fixes:
+
+- **Polynésie française (987) is excluded.** It is not in the residency
+  list, yet large (~44k in the 15-24 band) — including it would inflate
+  the eligibility denominator more than every other TOM combined. Its
+  parser is kept in `downloaders.py` but not synthesized by default.
+- **Wallis-et-Futuna (986) is included.** Its only census (RP2023) is
+  newer than the 2022 base year; the aging offset is floored at 0 (used
+  as-is) rather than dropping the territory — previously a negative
+  offset silently skipped it.
+
+**Anchor scope.** Mayotte (976), a DOM, is inside INSEE's France entière
+estimates and is re-anchored under `cohort-estimates`. The COM/TOM (975,
+986, 988) are *not* in France entière, so they keep their own-census
+totals and are excluded from the anchor denominator.
 
 ## MNAI over N4D for month-of-birth
 

@@ -24,6 +24,7 @@ from passculture.data.insee_population.constants import (
     CI_EXTRA_EPCI,
     CI_EXTRA_IRIS,
     CI_PER_YEAR,
+    DEPARTMENTS_COM,
     DEPARTMENTS_TOM,
     INSEE_ESTIMATES_LAST_YEAR,
     IRIS_SENTINEL_MASKED_SUFFIX,
@@ -127,12 +128,15 @@ def _apply_insee_anchor(conn: duckdb.DuckDBPyConnection) -> None:
         )
         return
 
-    tom_codes = ", ".join(f"'{d}'" for d in DEPARTMENTS_TOM)
+    # Territories NOT in INSEE's France entière (COM + TOM) keep their own-census
+    # totals and are excluded from the métropole+5DOM anchor denominator. Mayotte
+    # (976, a DOM) IS in France entière and is anchored.
+    excluded = ", ".join(f"'{d}'" for d in (*DEPARTMENTS_COM, *DEPARTMENTS_TOM))
     total_sql = "SELECT SUM(population) FROM population_department"
     before = conn.execute(total_sql).fetchone()[0]
     conn.execute(
         sql.CORRECT_DEPARTMENT_WITH_INSEE.format(
-            tom_codes=tom_codes,
+            excluded_codes=excluded,
             insee_last_year=INSEE_ESTIMATES_LAST_YEAR,
         )
     )

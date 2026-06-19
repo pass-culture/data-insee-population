@@ -38,8 +38,9 @@ __all__ = [
 # For each (year, age, sex) we scale every métropole + 5 DOM row by
 #   factor = INSEE_FE(year, naissance = year - age, sex) / frozen_m5dom_total
 # so that, by construction, the corrected métropole+5DOM national total equals
-# the INSEE estimate. TOM rows ({tom_codes}) are left untouched — INSEE's France
-# entière does not cover them, they keep their own-census values. Projection
+# the INSEE estimate. COM + TOM rows ({excluded_codes}) are left untouched —
+# INSEE's France entière does not cover them, they keep their own-census values.
+# Mayotte (976, a DOM) IS in France entière and is anchored. Projection
 # years beyond the INSEE file's last year reuse that last year's cohort total
 # (LEAST(year, {insee_last_year})), i.e. the cohort is held at its last observed
 # size. Years/cohorts/sex absent from INSEE keep the frozen value (factor = 1).
@@ -54,7 +55,7 @@ m5dom_totals AS (
     -- must group by month or the denominator would be 12x too large.
     SELECT year, month, age, sex, SUM(population) AS m5_total
     FROM frozen
-    WHERE department_code NOT IN ({tom_codes})
+    WHERE department_code NOT IN ({excluded_codes})
     GROUP BY year, month, age, sex
 ),
 factors AS (
@@ -72,11 +73,11 @@ factors AS (
 )
 SELECT
     f.* REPLACE (
-        f.population * (CASE WHEN f.department_code IN ({tom_codes})
+        f.population * (CASE WHEN f.department_code IN ({excluded_codes})
             THEN 1.0 ELSE COALESCE(fac.factor, 1.0) END) AS population,
-        f.population_low * (CASE WHEN f.department_code IN ({tom_codes})
+        f.population_low * (CASE WHEN f.department_code IN ({excluded_codes})
             THEN 1.0 ELSE COALESCE(fac.factor, 1.0) END) AS population_low,
-        f.population_high * (CASE WHEN f.department_code IN ({tom_codes})
+        f.population_high * (CASE WHEN f.department_code IN ({excluded_codes})
             THEN 1.0 ELSE COALESCE(fac.factor, 1.0) END) AS population_high
     )
 FROM frozen f

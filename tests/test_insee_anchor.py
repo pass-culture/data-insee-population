@@ -12,6 +12,7 @@ import pytest
 
 from passculture.data.insee_population import sql
 from passculture.data.insee_population.constants import (
+    DEPARTMENTS_COM,
     DEPARTMENTS_TOM,
     INSEE_ESTIMATES_LAST_YEAR,
 )
@@ -37,10 +38,10 @@ def conn():
 
 
 def _correct(c):
-    tom = ", ".join(f"'{d}'" for d in DEPARTMENTS_TOM)
+    excluded = ", ".join(f"'{d}'" for d in (*DEPARTMENTS_COM, *DEPARTMENTS_TOM))
     c.execute(
         sql.CORRECT_DEPARTMENT_WITH_INSEE.format(
-            tom_codes=tom, insee_last_year=INSEE_ESTIMATES_LAST_YEAR
+            excluded_codes=excluded, insee_last_year=INSEE_ESTIMATES_LAST_YEAR
         )
     )
 
@@ -89,6 +90,30 @@ def test_anchor_leaves_tom_untouched(conn):
         "SELECT population FROM population_department WHERE department_code='988'"
     ).fetchone()[0]
     assert tom == 4000.0
+
+
+def test_anchor_leaves_spm_untouched(conn):
+    # Saint-Pierre (975, a COM) is not in INSEE France entière -> not anchored.
+    conn.execute(f"""
+        INSERT INTO population_department SELECT * FROM (VALUES
+          (2026,1,'975','975',20,'male','exact',230.0,0.05,218.0,242.0)
+        ) AS t({_COLS})
+    """)
+    conn.execute(
+        "CREATE TABLE insee_estimates AS SELECT * FROM (VALUES "
+        "(2026,2006,'male',430000.0)) AS t(year,naissance,sex,population)"
+    )
+    _correct(conn)
+    spm = conn.execute(
+        "SELECT population FROM population_department WHERE department_code='975'"
+    ).fetchone()[0]
+    assert spm == 230.0
+    # ...and métropole still hits the INSEE total exactly (975 excluded from denom)
+    metro = conn.execute(
+        "SELECT SUM(population) FROM population_department "
+        "WHERE department_code NOT IN ('975','986','988')"
+    ).fetchone()[0]
+    assert metro == pytest.approx(430000.0)
 
 
 def test_anchor_missing_estimate_keeps_frozen(conn):
