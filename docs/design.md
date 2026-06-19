@@ -138,26 +138,10 @@ refinement).
 
 ## Territory scope follows pass-Culture eligibility
 
-The default territory set is the pass-Culture residency list, not "all
-of France". Eligible: métropole, the 5 DOM (Guadeloupe 971, Martinique
+The default territory set is the pass-Culture residency list.
+Eligible: métropole, the 5 DOM (Guadeloupe 971, Martinique
 972, Guyane 973, La Réunion 974, Mayotte 976), plus Saint-Pierre-et-
 Miquelon (975), Wallis-et-Futuna (986) and Nouvelle-Calédonie (988).
-
-Two consequences for the defaults:
-
-- **Polynésie française (987) is excluded.** It is not in the residency
-  list, yet it is large (~44k in the 15-24 band) — including it would
-  inflate the eligibility denominator by more than every other TOM
-  combined. Its parser is kept in `downloaders.py` but not synthesized
-  by default.
-- **Wallis-et-Futuna (986) is included.** Its only census (RP2023) is
-  newer than the 2022 base year; the aging offset is floored at 0 (used
-  as-is) rather than dropping the territory — a ≤1-year staleness on
-  ~11k people. Previously a negative offset silently skipped it.
-
-Known gap: **Saint-Pierre-et-Miquelon (975)** is eligible but has no
-machine-readable census source wired (~60 people per single-year
-cohort, <0.01% — negligible for now).
 
 ## MNAI over N4D for month-of-birth
 
