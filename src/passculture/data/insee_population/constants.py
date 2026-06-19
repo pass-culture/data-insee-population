@@ -71,6 +71,17 @@ MAYOTTE_POP1B_URL = (
 )
 MAYOTTE_POP1B_MEMBER = "BTX_TD_POP1B_2017.xls"
 
+# Saint-Pierre-et-Miquelon 2022 census (POP1B). COM, eligible for pass Culture
+# but not in INDCVI. Page 8581812. INSEE ships POP1B for all collectivités in a
+# single "C.O.M." workbook (one row per commune); we keep only the 975 communes
+# (97501 Miquelon-Langlade, 97502 Saint-Pierre). Same wide layout as Mayotte.
+SPM_CENSUS_YEAR = 2022
+SPM_POP1B_URL = (
+    "https://www.insee.fr/fr/statistiques/fichier/8581812/TD_POP1B_2022_COM_xlsx.zip"
+)
+SPM_POP1B_MEMBER = "TD_POP1B_2022_COM.xlsx"
+SPM_CODGEO_PREFIX = "975"
+
 # MOBSCO (Mobilités Scolaires) — student commuting flows
 # Contains residence commune (COMMUNE) and study commune (DCETUF)
 MOBSCO_URL = (

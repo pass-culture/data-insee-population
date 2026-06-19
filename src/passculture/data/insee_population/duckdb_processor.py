@@ -40,6 +40,7 @@ from passculture.data.insee_population.downloaders import (
     download_mnai_birth_distribution,
     download_mobsco,
     synthesize_mayotte_population,
+    synthesize_spm_population,
     synthesize_tom_population,
 )
 from passculture.data.insee_population.geo_mappings import get_geo_mappings
@@ -172,6 +173,9 @@ class PopulationProcessor:
 
         if self.include_tom:
             self._add_tom()
+
+        if self.include_com:
+            self._add_spm()
 
         return self
 
@@ -393,6 +397,19 @@ class PopulationProcessor:
             )
         self._register_dataframe("tom_df", tom_df)
         self._execute(sql.INSERT_TOM)
+
+    def _add_spm(self) -> None:
+        """Add Saint-Pierre-et-Miquelon (975) from its 2022 POP1B census.
+
+        Best-effort: a missing/unparsable SPM source is logged and skipped
+        rather than failing the run (SPM is ~0.007% of the eligible population).
+        """
+        spm_df = synthesize_spm_population(self.year, cache_dir=self.cache_dir)
+        if spm_df.empty:
+            logger.warning("Saint-Pierre-et-Miquelon (975) unavailable — skipping.")
+            return
+        self._register_dataframe("spm_df", spm_df)
+        self._execute(sql.INSERT_SPM)
 
     def _load_geo_mappings(self) -> None:
         """Load commune→EPCI and canton→EPCI weight mappings."""

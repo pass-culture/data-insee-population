@@ -138,10 +138,20 @@ refinement).
 
 ## Territory scope follows pass-Culture eligibility
 
-The default territory set is the pass-Culture residency list.
-Eligible: métropole, the 5 DOM (Guadeloupe 971, Martinique
+The default territory set is the pass-Culture residency list, not "all
+of France". Eligible: métropole, the 5 DOM (Guadeloupe 971, Martinique
 972, Guyane 973, La Réunion 974, Mayotte 976), plus Saint-Pierre-et-
 Miquelon (975), Wallis-et-Futuna (986) and Nouvelle-Calédonie (988).
+
+How each is sourced:
+
+| Territory | Source |
+|---|---|
+| Métropole + 4 DOM (971-974) | INDCVI 2022 |
+| Mayotte (976) | POP1B 2017 aged forward |
+| Saint-Pierre-et-Miquelon (975) | POP1B 2022 (`C.O.M.` workbook, 975 communes) |
+| Wallis-et-Futuna (986) | RP2023 |
+| Nouvelle-Calédonie (988) | RP2019 |
 
 ## MNAI over N4D for month-of-birth
 

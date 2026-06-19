@@ -32,6 +32,7 @@ Each row carries `population`, `confidence_pct`, `population_low`,
 | RP2022 INDCVI | [8647104](https://www.insee.fr/fr/statistiques/8647104) | Census base: population by dept × canton × commune × IRIS × age × sex |
 | RP2022 INDREG | [8590183](https://www.insee.fr/fr/statistiques/8590183) | Month-of-birth (MNAI) per region + per dept ≥ 700k pop |
 | Mayotte 2017 POP1B | [4199233](https://www.insee.fr/fr/statistiques/4199233) | Mayotte age pyramid (aged forward) |
+| Saint-Pierre-et-Miquelon 2022 POP1B | [8581812](https://www.insee.fr/fr/statistiques/8581812) | SPM (975) age pyramid by sex (aged forward) |
 | INSEE annual estimates (POP3 `3_Pop1janv_age.xlsx`) | [8999013](https://www.insee.fr/fr/statistiques/8999013) | National cohort totals by année de naissance × sex × year (France entière), 1991→latest release. **Anchor for `cohort-estimates`** |
 | TOM Pacifique censuses (Wallis 2023, N.-Calédonie 2019) | STSEE / ISEE | Eligible TOM age pyramids (aged forward) |
 | N4D births | [8582142](https://www.insee.fr/fr/statistiques/8582142) | Monthly birth counts — **fallback** when MNAI is unavailable |
@@ -49,13 +50,14 @@ Each row carries `population`, `confidence_pct`, `population_low`,
    + 4 DOM. The remaining pass-Culture-eligible territories are added
    from their own censuses, aged forward to the census year:
    - **Mayotte (976)** from POP1B 2017 (`age + (census_year − 2017)`).
+   - **Saint-Pierre-et-Miquelon (975)** from POP1B 2022 (the `C.O.M.`
+     workbook, filtered to the 975 communes).
    - **Wallis-et-Futuna (986)** from RP2023, **Nouvelle-Calédonie
      (988)** from RP2019. When a territory's census is newer than the
      base year the aging offset is floored at 0 (used as-is).
    - **Polynésie française (987)** is *not* in the pass-Culture
-     residency list and is excluded by default. Saint-Pierre-et-Miquelon
-     (975) is eligible but has no machine-readable source wired yet
-     (~60 people per single-year cohort — a known gap).
+     residency list and is excluded by default (its parser is kept but
+     not synthesized).
 
 3. **Project the cohorts.** Three methods are available via `--method`:
 

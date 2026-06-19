@@ -210,3 +210,64 @@ def test_synthesize_tom_defaults_to_eligible_only(monkeypatch):
     assert depts == {"986", "988"}  # eligible only
     assert "987" not in depts  # Polynésie excluded by default
     assert "986" in calls  # Wallis NOT skipped despite 2023 census
+
+
+def _make_pop1b_com_bytes():
+    """Minimal POP1B 'C.O.M.' workbook: 2 SPM communes + 1 other COM commune."""
+    import io
+
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "C.O.M."
+    blank = [None] * 6
+    grid = [
+        blank,
+        blank,
+        blank,
+        blank,
+        blank,
+        ["Variables :", "SEXE", "1", "1", "2", "2"],  # SEXE header
+        [None, "AGED100", "015", "016", "015", "016"],  # AGED100 header
+        blank,
+        blank,
+        blank,
+        ["CODGEO", "LIBGEO", None, None, None, None],  # CODGEO header
+        ["97501", "Miquelon-Langlade", 5, 6, 4, 7],  # SPM
+        ["97502", "Saint-Pierre", 20, 25, 18, 22],  # SPM
+        ["97701", "Saint-Barthélemy", 100, 110, 95, 105],  # NOT 975
+    ]
+    for row in grid:
+        ws.append(row)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_parse_pop1b_wide_filters_by_codgeo_prefix():
+    raw_bytes = _make_pop1b_com_bytes()
+    # prefix '975' keeps only the two SPM communes
+    spm = downloaders._parse_pop1b_wide(raw_bytes, codgeo_prefix="975")
+    # age 15 male = 5 + 20 = 25 (St-Barth 100 excluded)
+    m15 = spm[(spm.age == 15) & (spm.sex == "male")].population.iloc[0]
+    assert m15 == 25
+    # no prefix sums every commune (St-Barth included): 5 + 20 + 100 = 125
+    allc = downloaders._parse_pop1b_wide(raw_bytes, codgeo_prefix=None)
+    assert allc[(allc.age == 15) & (allc.sex == "male")].population.iloc[0] == 125
+
+
+def test_synthesize_spm_ages_forward(monkeypatch):
+    import pandas as pd
+
+    monkeypatch.setattr(
+        downloaders,
+        "download_spm_pop1b",
+        lambda cache_dir=None: pd.DataFrame(
+            {"age": [15, 16], "sex": ["male", "female"], "population": [10.0, 12.0]}
+        ),
+    )
+    # SPM census year is 2022; project to 2024 -> ages shift +2
+    df = downloaders.synthesize_spm_population(2024, cache_dir=None)
+    assert set(df.department_code.unique()) == {"975"}
+    assert sorted(df.age.unique()) == [17, 18]
