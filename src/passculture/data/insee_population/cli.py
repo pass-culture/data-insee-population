@@ -124,6 +124,23 @@ def population(
         "--table-prefix",
         help="BigQuery table name prefix (default: population)",
     ),
+    levels: str = typer.Option(
+        "department,epci,canton,iris",
+        "--levels",
+        help=(
+            "Comma-separated geographic levels to export "
+            "(default: all). E.g. --levels department,epci"
+        ),
+    ),
+    yearly_levels: str = typer.Option(
+        "",
+        "--yearly-levels",
+        help=(
+            "Comma-separated levels to export at yearly (Jan 1st) resolution "
+            "instead of monthly. Bounds memory/storage for high-res levels. "
+            "E.g. --monthly --yearly-levels epci,canton,iris"
+        ),
+    ),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
@@ -173,6 +190,24 @@ def population(
         )
         raise typer.Exit(code=1)
 
+    valid_levels = ["department", "epci", "canton", "iris"]
+    selected_levels = [lv.strip() for lv in levels.split(",") if lv.strip()]
+    yearly_level_list = [lv.strip() for lv in yearly_levels.split(",") if lv.strip()]
+    bad_levels = [
+        lv for lv in selected_levels + yearly_level_list if lv not in valid_levels
+    ]
+    if bad_levels:
+        console.print(
+            f"[red bold]Error: unknown level(s) {bad_levels}. "
+            f"Valid: {valid_levels}.[/red bold]"
+        )
+        raise typer.Exit(code=1)
+    if yearly_level_list and not monthly:
+        console.print(
+            "[yellow]Note: --yearly-levels has no effect without --monthly "
+            "(tables are already yearly).[/yellow]"
+        )
+
     mode_label = "monthly" if monthly else "yearly"
     console.print("[bold blue]INSEE Population Import[/bold blue]")
     console.print(
@@ -220,7 +255,14 @@ def population(
         from passculture.data.insee_population.bigquery import export_all_to_bigquery
 
         console.print(f"\n[bold]Exporting to BigQuery: {project_id}.{dataset}[/bold]")
-        export_all_to_bigquery(processor, project_id, dataset, table_prefix)
+        export_all_to_bigquery(
+            processor,
+            project_id,
+            dataset,
+            table_prefix,
+            levels=selected_levels,
+            yearly_levels=yearly_level_list,
+        )
         console.print("[green]BigQuery export complete.[/green]")
     else:
         output_path = Path(output_dir)

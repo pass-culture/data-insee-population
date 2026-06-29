@@ -21,8 +21,7 @@ from passculture.data.insee_population.duckdb_processor import PopulationProcess
 # -------------------------------------------------------------------------
 
 
-@pytest.fixture
-def projection_processor() -> PopulationProcessor:
+def _build_projection_processor(monthly: bool = False) -> PopulationProcessor:
     """Create a processor with projected tables for all 4 levels."""
     from passculture.data.insee_population import sql
     from passculture.data.insee_population.projections import (
@@ -36,6 +35,7 @@ def projection_processor() -> PopulationProcessor:
         max_age=20,
         start_year=2022,
         end_year=2023,
+        monthly=monthly,
         cache_dir=None,
     )
 
@@ -109,9 +109,23 @@ def projection_processor() -> PopulationProcessor:
     compute_geo_ratios(processor.conn, "epci")
     compute_geo_ratios(processor.conn, "canton")
     compute_geo_ratios(processor.conn, "iris")
-    project_multi_year(processor.conn, 15, 20, start_year=2022, end_year=2023)
+    project_multi_year(
+        processor.conn, 15, 20, start_year=2022, end_year=2023, monthly=monthly
+    )
 
     return processor
+
+
+@pytest.fixture
+def projection_processor() -> PopulationProcessor:
+    """Processor with yearly (Jan 1st) projected tables for all 4 levels."""
+    return _build_projection_processor(monthly=False)
+
+
+@pytest.fixture
+def monthly_projection_processor() -> PopulationProcessor:
+    """Processor with monthly (12 snapshots) projected tables for all levels."""
+    return _build_projection_processor(monthly=True)
 
 
 # -------------------------------------------------------------------------
@@ -217,7 +231,7 @@ class TestExportToBigQuery:
         mock_bq.Client.return_value = mock_client
         mock_job = MagicMock()
         mock_job.output_rows = 42
-        mock_client.load_table_from_dataframe.return_value = mock_job
+        mock_client.load_table_from_file.return_value = mock_job
 
         from passculture.data.insee_population.bigquery import export_to_bigquery
 
@@ -235,6 +249,34 @@ class TestExportToBigQuery:
             assert schema_names == expected_names, (
                 f"Schema mismatch for {level}: {schema_names} != {expected_names}"
             )
+
+    @patch("passculture.data.insee_population.bigquery.bigquery")
+    def test_streams_via_parquet_not_pandas(self, mock_bq, projection_processor):
+        """Export loads from a Parquet file, never materialising a DataFrame.
+
+        This is the memory-safe path: ``to_pandas`` (which would build the
+        full ~300M-row IRIS frame in memory and OOM-kill the job) must not
+        be called, and the load must go through ``load_table_from_file``.
+        """
+        mock_client = MagicMock()
+        mock_bq.Client.return_value = mock_client
+        mock_client.load_table_from_file.return_value = MagicMock(output_rows=1)
+
+        from passculture.data.insee_population.bigquery import export_to_bigquery
+
+        with patch.object(
+            projection_processor, "to_pandas", wraps=projection_processor.to_pandas
+        ) as spy_to_pandas:
+            export_to_bigquery(projection_processor, "iris", "p", "d", "pop_iris")
+
+        spy_to_pandas.assert_not_called()
+        mock_client.load_table_from_dataframe.assert_not_called()
+        assert mock_client.load_table_from_file.call_count == 1
+        # PARQUET source format is set on the load job config.
+        assert (
+            mock_bq.SourceFormat.PARQUET
+            is mock_bq.LoadJobConfig.call_args.kwargs["source_format"]
+        )
 
     @patch("passculture.data.insee_population.bigquery.bigquery")
     def test_rejects_unknown_level(self, mock_bq, projection_processor):
@@ -255,20 +297,121 @@ class TestExportAllToBigQuery:
         mock_bq.Client.return_value = mock_client
         mock_job = MagicMock()
         mock_job.output_rows = 10
-        mock_client.load_table_from_dataframe.return_value = mock_job
+        mock_client.load_table_from_file.return_value = mock_job
 
         from passculture.data.insee_population.bigquery import export_all_to_bigquery
 
         export_all_to_bigquery(projection_processor, "proj", "ds", "pop")
 
         # Should have been called 4 times
-        assert mock_client.load_table_from_dataframe.call_count == 4
+        assert mock_client.load_table_from_file.call_count == 4
 
         # Check table refs
         table_refs = [
-            call[0][1] for call in mock_client.load_table_from_dataframe.call_args_list
+            call[0][1] for call in mock_client.load_table_from_file.call_args_list
         ]
         assert "proj.ds.pop_department" in table_refs
         assert "proj.ds.pop_epci" in table_refs
         assert "proj.ds.pop_canton" in table_refs
         assert "proj.ds.pop_iris" in table_refs
+
+    @patch("passculture.data.insee_population.bigquery.bigquery")
+    def test_levels_selection_skips_unwanted(self, mock_bq, projection_processor):
+        """Only the requested levels are exported."""
+        mock_client = MagicMock()
+        mock_bq.Client.return_value = mock_client
+        mock_client.load_table_from_file.return_value = MagicMock(output_rows=1)
+
+        from passculture.data.insee_population.bigquery import export_all_to_bigquery
+
+        export_all_to_bigquery(
+            projection_processor, "proj", "ds", "pop", levels=["department", "epci"]
+        )
+
+        table_refs = [
+            call[0][1] for call in mock_client.load_table_from_file.call_args_list
+        ]
+        assert table_refs == ["proj.ds.pop_department", "proj.ds.pop_epci"]
+
+    @patch("passculture.data.insee_population.bigquery.bigquery")
+    def test_rejects_unknown_level_in_selection(self, mock_bq, projection_processor):
+        """export_all_to_bigquery raises ValueError for an unknown level."""
+        from passculture.data.insee_population.bigquery import export_all_to_bigquery
+
+        with pytest.raises(ValueError, match="Unknown level"):
+            export_all_to_bigquery(
+                projection_processor, "p", "d", "pop", levels=["department", "commune"]
+            )
+
+
+class TestYearlyDownsample:
+    """Tests for per-level yearly downsampling of monthly-built tables."""
+
+    def test_monthly_table_has_twelve_snapshot_months(
+        self, monthly_projection_processor, tmp_path
+    ):
+        """Sanity: a monthly-built level streams 12 snapshot months."""
+        import duckdb
+
+        path = monthly_projection_processor.copy_level_to_parquet(
+            "department", tmp_path / "dept.parquet"
+        )
+        months = duckdb.sql(
+            f"SELECT DISTINCT month FROM '{path}' ORDER BY month"
+        ).fetchall()
+        assert [m[0] for m in months] == list(range(1, 13))
+
+    def test_yearly_keeps_only_january_snapshot(
+        self, monthly_projection_processor, tmp_path
+    ):
+        """yearly=True downsamples a monthly table to the Jan 1st snapshot."""
+        import duckdb
+
+        full = monthly_projection_processor.copy_level_to_parquet(
+            "department", tmp_path / "full.parquet"
+        )
+        yearly = monthly_projection_processor.copy_level_to_parquet(
+            "department", tmp_path / "yearly.parquet", yearly=True
+        )
+
+        yearly_months = duckdb.sql(f"SELECT DISTINCT month FROM '{yearly}'").fetchall()
+        assert [m[0] for m in yearly_months] == [1]
+
+        n_full = duckdb.sql(f"SELECT COUNT(*) FROM '{full}'").fetchone()[0]
+        n_yearly = duckdb.sql(f"SELECT COUNT(*) FROM '{yearly}'").fetchone()[0]
+        # Snapshot months collapse 12 -> 1; birth_month expansion is unchanged.
+        assert n_full == n_yearly * 12
+
+    @patch("passculture.data.insee_population.bigquery.bigquery")
+    def test_export_all_yearly_levels_passes_flag(
+        self, mock_bq, monthly_projection_processor
+    ):
+        """yearly_levels routes only the named levels through the yearly path."""
+        mock_client = MagicMock()
+        mock_bq.Client.return_value = mock_client
+        mock_client.load_table_from_file.return_value = MagicMock(output_rows=1)
+
+        from passculture.data.insee_population.bigquery import export_all_to_bigquery
+
+        with patch.object(
+            monthly_projection_processor,
+            "copy_level_to_parquet",
+            wraps=monthly_projection_processor.copy_level_to_parquet,
+        ) as spy:
+            export_all_to_bigquery(
+                monthly_projection_processor,
+                "proj",
+                "ds",
+                "pop",
+                yearly_levels=["epci", "canton", "iris"],
+            )
+
+        yearly_by_level = {
+            call.args[0]: call.kwargs["yearly"] for call in spy.call_args_list
+        }
+        assert yearly_by_level == {
+            "department": False,
+            "epci": True,
+            "canton": True,
+            "iris": True,
+        }

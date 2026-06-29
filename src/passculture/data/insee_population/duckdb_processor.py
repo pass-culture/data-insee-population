@@ -266,6 +266,46 @@ class PopulationProcessor:
 
         return self
 
+    def _level_select(self, level: str, *, yearly: bool = False) -> str:
+        """Build the birth-month-expanded SELECT for a geographic level.
+
+        Args:
+            level: One of 'department', 'epci', 'canton', 'iris'
+            yearly: Keep only the Jan 1st snapshot (``month = 1``). Use to
+                downsample a monthly-built table to yearly resolution at
+                export time (12x fewer rows).
+        """
+        select = sql.SELECT_WITH_BIRTH_MONTH.format(
+            level=level,
+            geo_columns=_GEO_COLUMNS[level],
+        )
+        if yearly:
+            # SELECT_WITH_BIRTH_MONTH ends with a WHERE clause, so AND-append.
+            select += "\n    AND pd.month = 1"
+        return select
+
+    def copy_level_to_parquet(
+        self, level: str, path: str | Path, *, yearly: bool = False
+    ) -> Path:
+        """Stream one level's birth-month-expanded rows to a parquet file.
+
+        The 12x birth-month expansion is applied via streaming COPY — the
+        full expanded result is never materialised in memory. This is the
+        memory-safe path for large levels (IRIS expands to ~300M rows).
+
+        Args:
+            level: One of 'department', 'epci', 'canton', 'iris'
+            path: Destination parquet file path
+            yearly: Keep only the Jan 1st snapshot (``month = 1``)
+
+        Returns:
+            The destination path.
+        """
+        path = Path(path)
+        select = self._level_select(level, yearly=yearly)
+        self._execute(f"COPY ({select}) TO '{path}' (FORMAT PARQUET)")
+        return path
+
     def save_multi_level(self, output_dir: str | Path) -> dict[str, Path]:
         """Save all multi-level tables to parquet files.
 
@@ -285,11 +325,7 @@ class PopulationProcessor:
         paths = {}
         for level in ["department", "epci", "canton", "iris"]:
             path = output_dir / f"population_{level}.parquet"
-            select = sql.SELECT_WITH_BIRTH_MONTH.format(
-                level=level,
-                geo_columns=_GEO_COLUMNS[level],
-            )
-            self._execute(f"COPY ({select}) TO '{path}' (FORMAT PARQUET)")
+            self.copy_level_to_parquet(level, path)
             paths[level] = path
 
         return paths
@@ -303,11 +339,7 @@ class PopulationProcessor:
         Args:
             level: One of 'department', 'epci', 'canton', 'iris'
         """
-        select = sql.SELECT_WITH_BIRTH_MONTH.format(
-            level=level,
-            geo_columns=_GEO_COLUMNS[level],
-        )
-        return self._execute(select).df()
+        return self._execute(self._level_select(level)).df()
 
     def validate(self) -> dict[str, Any]:
         """Validate population data against expected structure."""
