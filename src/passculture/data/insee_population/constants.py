@@ -331,7 +331,7 @@ _COMMON_SCHEMA = [
     {"name": "population", "type": "FLOAT", "description": "Population estimate"},
     {
         "name": "confidence_pct",
-        "type": "FLOAT",
+        "type": "NUMERIC",
         "description": "Estimated error margin (0-1)",
     },
     {
