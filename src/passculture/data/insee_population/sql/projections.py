@@ -137,11 +137,11 @@ SELECT
     sex,
     'exact' AS geo_precision,
     population,
-    CASE
+    CAST(CASE
         WHEN ABS(year - {census_year}) <= 1 THEN {ci_base_near}
         WHEN ABS(year - {census_year}) <= 3 THEN {ci_base_mid}
         ELSE {ci_per_year} * ABS(year - {census_year})
-    END AS confidence_pct,
+    END AS DOUBLE) AS confidence_pct,
     population * (1.0 - CASE
         WHEN ABS(year - {census_year}) <= 1 THEN {ci_base_near}
         WHEN ABS(year - {census_year}) <= 3 THEN {ci_base_mid}
@@ -228,11 +228,11 @@ SELECT
     sex,
     'exact' AS geo_precision,
     population,
-    CASE
+    CAST(CASE
         WHEN ABS(year - {census_year}) <= 1 THEN {ci_base_near}
         WHEN ABS(year - {census_year}) <= 3 THEN {ci_base_mid}
         ELSE {ci_per_year} * ABS(year - {census_year})
-    END AS confidence_pct,
+    END AS DOUBLE) AS confidence_pct,
     population * (1.0 - CASE
         WHEN ABS(year - {census_year}) <= 1 THEN {ci_base_near}
         WHEN ABS(year - {census_year}) <= 3 THEN {ci_base_mid}
@@ -271,7 +271,7 @@ SELECT
     pd.sex,
     'exact' AS geo_precision,
     pd.population * gr.geo_ratio AS population,
-    pd.confidence_pct + {{ci_extra_{level}}} AS confidence_pct,
+    CAST(pd.confidence_pct + {{ci_extra_{level}}} AS DOUBLE) AS confidence_pct,
     pd.population * gr.geo_ratio * (1.0 - (pd.confidence_pct + {{ci_extra_{level}}}))
         AS population_low,
     pd.population * gr.geo_ratio * (1.0 + (pd.confidence_pct + {{ci_extra_{level}}}))

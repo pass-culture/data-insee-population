@@ -161,6 +161,38 @@ class TestSchemaMatchesSQLOutput:
         assert list(df.columns) == schema_cols
 
 
+class TestParquetColumnTypes:
+    """FLOAT schema columns must export as DOUBLE, never DECIMAL.
+
+    Regression for a BigQuery load failure: ``confidence_pct`` was built from a
+    CASE over decimal literals (e.g. 0.02), which DuckDB infers as DECIMAL and
+    writes to Parquet as FIXED_LEN_BYTE_ARRAY. BigQuery's FLOAT target column
+    then rejected the load ("does not match the target cpp_type DOUBLE").
+    """
+
+    @pytest.mark.parametrize("level", ["department", "epci", "canton", "iris"])
+    def test_float_columns_export_as_double(
+        self, projection_processor, tmp_path, level
+    ):
+        path = projection_processor.copy_level_to_parquet(
+            level, tmp_path / f"{level}.parquet"
+        )
+        types = dict(
+            projection_processor.conn.execute(
+                "SELECT column_name, column_type "
+                f"FROM (DESCRIBE SELECT * FROM read_parquet('{path}'))"
+            ).fetchall()
+        )
+        float_cols = [
+            c["name"] for c in POPULATION_SCHEMAS[level] if c["type"] == "FLOAT"
+        ]
+        assert float_cols  # guard: schema must declare some FLOAT columns
+        for col in float_cols:
+            assert types[col] == "DOUBLE", (
+                f"{level}.{col} exported as {types[col]}, expected DOUBLE"
+            )
+
+
 class TestSchemaStructure:
     """Verify schema dict structure and completeness."""
 
