@@ -273,6 +273,13 @@ CI_EXTRA_CANTON = 0.05  # additional uncertainty for canton geo_ratio
 CI_EXTRA_EPCI = 0.03  # additional uncertainty for EPCI geo_ratio
 CI_EXTRA_IRIS = 0.10  # additional uncertainty for IRIS geo_ratio
 
+# cohort-stable: age-in-years window used to smooth the department share
+# before it's applied. INDCVI is a rotating panel (not an exhaustive annual
+# census), so a single year of age can carry a thin sample for mid/small
+# departments -- pooling +/- this many years of age damps that sampling
+# noise without touching the (large-sample) national cohort totals.
+DEPT_SHARE_SMOOTHING_WINDOW = 2
+
 
 # Age bands affected by student mobility correction (MOBSCO).
 # Order must match STUDENT_BAND_AGEREV10 keys.

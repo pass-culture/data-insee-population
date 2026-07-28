@@ -10,6 +10,8 @@ from pathlib import Path
 import typer
 from rich.console import Console
 
+from passculture.data.insee_population.constants import DEPT_SHARE_SMOOTHING_WINDOW
+
 
 class Method(str, Enum):
     """Dept-level projection methods.
@@ -103,6 +105,16 @@ def population(
             "cohort-aging: legacy aging in place."
         ),
         case_sensitive=False,
+    ),
+    dept_share_smoothing_window: int = typer.Option(
+        DEPT_SHARE_SMOOTHING_WINDOW,
+        "--dept-share-smoothing-window",
+        help=(
+            "Years of age (+/-) pooled when computing per-department "
+            "population, to damp single-year-of-age INDCVI sampling noise "
+            "(a rotating panel, not an exhaustive annual census). Applies "
+            "to all --method values. 0 disables smoothing."
+        ),
     ),
     to_bigquery: bool = typer.Option(
         False,
@@ -213,7 +225,8 @@ def population(
     console.print(
         f"Census year: {year} | Ages: {min_age}-{max_age} | "
         f"Projection: {start_year}-{end_year} ({mode_label}) | "
-        f"Method: {method.value}"
+        f"Method: {method.value} "
+        f"(dept share smoothing: +/-{dept_share_smoothing_window}y)"
     )
 
     if include_mayotte:
@@ -238,6 +251,7 @@ def population(
             correct_student_mobility=correct_student_mobility,
             monthly=monthly,
             method=method.value,
+            dept_share_smoothing_window=dept_share_smoothing_window,
             cache_dir=cache_dir,
         )
     except ValueError as e:

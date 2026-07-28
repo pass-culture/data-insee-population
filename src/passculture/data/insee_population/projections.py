@@ -26,6 +26,7 @@ from passculture.data.insee_population.constants import (
     CI_PER_YEAR,
     DEPARTMENTS_COM,
     DEPARTMENTS_TOM,
+    DEPT_SHARE_SMOOTHING_WINDOW,
     INSEE_ESTIMATES_LAST_YEAR,
     IRIS_SENTINEL_MASKED_SUFFIX,
     IRIS_SENTINEL_NO_GEO,
@@ -159,8 +160,24 @@ def project_multi_year(
     census_year: int = 2022,
     monthly: bool = False,
     method: ProjectionMethod = "cohort-stable",
+    dept_share_smoothing_window: int = DEPT_SHARE_SMOOTHING_WINDOW,
 ) -> None:
     """Project multi-year population at all geographic levels.
+
+    ``dept_share_smoothing_window`` applies to all three methods, to damp
+    single-year-of-age INDCVI sampling noise (INDCVI is a rotating panel,
+    not an exhaustive annual census). Pass 0 to disable (reproduces the
+    pre-smoothing, single-age-exact behavior) at every method. All methods
+    still reproduce the exact observed census value at ``census_year``
+    itself, regardless of the window.
+
+    * ``cohort-stable`` / ``cohort-estimates`` (share the same SQL
+      template): pools the department SHARE over +/- this many years of
+      age before dividing (see ``CREATE_PROJECTED_DEPARTMENT_COHORT_STABLE``).
+    * ``cohort-aging``: has no share to smooth (it carries each census
+      cohort's raw count forward as-is) -- instead averages the raw
+      department population count over the same age window (see
+      ``CREATE_PROJECTED_DEPARTMENT``).
 
     Three dept-level methods (see ``sql/projections.py`` docstring for the
     algebra):
@@ -207,6 +224,7 @@ def project_multi_year(
         "ci_base_near": CI_BASE_NEAR,
         "ci_base_mid": CI_BASE_MID,
         "ci_per_year": CI_PER_YEAR,
+        "smoothing_window": dept_share_smoothing_window,
     }
 
     # Monthly vs yearly mode controls how snapshot months are generated.

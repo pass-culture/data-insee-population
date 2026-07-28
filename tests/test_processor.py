@@ -858,7 +858,16 @@ class TestSimpleAging:
         )
 
     def test_cohort_aging_forward(self):
-        """Legacy: census age 15 in 2022 should become age 18 in 2025 (same dept)."""
+        """Legacy: census age 15 in 2022 should become age 18 in 2025 (same dept).
+
+        cohort-aging carries each census (dept, age, sex) count forward
+        as-is with no share/ratio, so it's exposed to the same
+        single-year-of-age INDCVI sampling noise as cohort-stable -- it's
+        smoothed the same way (average over a +/- age window), except at
+        the census year itself, which stays exact (see
+        test_cohort_stable_matches_census_at_census_year for the
+        cohort-stable equivalent of this invariant).
+        """
         from passculture.data.insee_population import sql
         from passculture.data.insee_population.projections import (
             compute_geo_ratios,
@@ -910,21 +919,36 @@ class TestSimpleAging:
             method="cohort-aging",
         )
 
-        # In 2025, age 15 = census age 12 (=500), age 16 = census age 13 (=300)
+        # At the census year (2022) itself, values stay exact.
+        pop_15_2022 = processor.conn.execute("""
+            SELECT population FROM population_department
+            WHERE year = 2022 AND age = 15 AND department_code = '75' AND sex = 'male'
+        """).fetchone()[0]
+        assert abs(pop_15_2022 - 200.0) < 0.1, (
+            f"2022 (census year) age 15 ({pop_15_2022}) should equal raw census 200.0"
+        )
+
+        # In 2025, age 15 = census age 12 -- smoothed with its neighbor age
+        # 13 (ages 10/11/14 don't exist in this fixture): (500+300)/2=400,
+        # not the raw 500.
         pop_15_2025 = processor.conn.execute("""
             SELECT population FROM population_department
             WHERE year = 2025 AND age = 15 AND department_code = '75' AND sex = 'male'
         """).fetchone()[0]
-        assert abs(pop_15_2025 - 500.0) < 0.1, (
-            f"2025 age 15 ({pop_15_2025}) should equal census age 12 (500.0)"
+        assert abs(pop_15_2025 - 400.0) < 0.1, (
+            f"2025 age 15 ({pop_15_2025}) should equal smoothed census age 12 "
+            "((500+300)/2=400.0), not the raw 500.0"
         )
 
+        # age 16 = census age 13 -- smoothed with ages 12 and 15 (14 is
+        # absent): (500+300+200)/3 = 333.33, not the raw 300.
         pop_16_2025 = processor.conn.execute("""
             SELECT population FROM population_department
             WHERE year = 2025 AND age = 16 AND department_code = '75' AND sex = 'male'
         """).fetchone()[0]
-        assert abs(pop_16_2025 - 300.0) < 0.1, (
-            f"2025 age 16 ({pop_16_2025}) should equal census age 13 (300.0)"
+        assert abs(pop_16_2025 - 333.33) < 0.1, (
+            f"2025 age 16 ({pop_16_2025}) should equal smoothed census age 13 "
+            "((500+300+200)/3=333.33), not the raw 300.0"
         )
 
 
@@ -1274,6 +1298,104 @@ class TestCohortStable:
         """).fetchone()[0]
 
         assert abs(yearly_total - monthly_jan_total) < 0.1
+
+    def test_cohort_stable_smooths_single_age_sampling_noise(self):
+        """A single-age dip in a small dept's census share is damped when
+        projected forward, but reproduced exactly at the census year itself.
+
+        Dept 99 (small): 100/100/40/100/100 at ages 17-21 -- age 19 is an
+        isolated dip (INDCVI rotating-panel sampling noise), not a trend.
+        Dept 11 (large): flat 900 at every age, so national totals per age
+        are 1000/1000/940/1000/1000.
+
+        Raw age-19 share for dept 99 = 40/940 ~= 4.3%. Its neighbors are all
+        10%. Real single-year INDCVI noise looks exactly like this (see
+        Landes/Aveyron/Yonne department shares in production data).
+        """
+        from passculture.data.insee_population import sql
+        from passculture.data.insee_population.projections import (
+            compute_geo_ratios,
+            project_multi_year,
+        )
+
+        processor = PopulationProcessor(
+            year=2022,
+            min_age=17,
+            max_age=21,
+            start_year=2022,
+            end_year=2023,
+            cache_dir=None,
+        )
+        rows = []
+        for age, pop99 in zip(
+            range(17, 22), [100.0, 100.0, 40.0, 100.0, 100.0], strict=True
+        ):
+            rows.append(
+                (2022, "99", "11", "9901", "99001", "990010101", age, "male", pop99)
+            )
+            rows.append(
+                (2022, "11", "93", "1101", "11001", "110010101", age, "male", 900.0)
+            )
+        processor.conn.execute(
+            "CREATE OR REPLACE TABLE population AS "
+            "SELECT * FROM (VALUES "
+            + ", ".join(
+                "({}, '{}', '{}', '{}', '{}', '{}', {}, '{}', {})".format(*r)
+                for r in rows
+            )
+            + ") AS t(year, department_code, region_code, canton_code, "
+            "commune_code, iris_code, age, sex, population)"
+        )
+        processor._base_table_created = True
+        _setup_geo_mappings(processor)
+        monthly_df = pd.DataFrame(
+            [
+                {"department_code": d, "month": m, "month_ratio": 1.0 / 12}
+                for d in ["99", "11"]
+                for m in range(1, 13)
+            ]
+        )
+        processor._register_dataframe("monthly_births_df", monthly_df)
+        processor._execute(sql.REGISTER_MONTHLY_BIRTHS)
+
+        compute_geo_ratios(processor.conn, "epci")
+        compute_geo_ratios(processor.conn, "canton")
+        compute_geo_ratios(processor.conn, "iris")
+
+        project_multi_year(
+            processor.conn,
+            17,
+            21,
+            start_year=2022,
+            end_year=2023,
+            method="cohort-stable",
+        )
+
+        census_year_pop = processor.conn.execute("""
+            SELECT population FROM population_department
+            WHERE year = 2022 AND age = 19 AND department_code = '99'
+              AND sex = 'male'
+        """).fetchone()[0]
+        assert abs(census_year_pop - 40.0) < 0.1, (
+            f"Census year (2022) age 19 dept 99 = {census_year_pop:.1f}, "
+            "expected exact raw value 40.0 -- smoothing must not touch the "
+            "observed census year."
+        )
+
+        projected_pop = processor.conn.execute("""
+            SELECT population FROM population_department
+            WHERE year = 2023 AND age = 19 AND department_code = '99'
+              AND sex = 'male'
+        """).fetchone()[0]
+        # Unsmoothed this would be 1000 (age-18 national total, since a
+        # 19-year-old in 2023 was 18 at census) * 40/940 ~= 42.6 -- i.e.
+        # barely above the raw noisy value. Smoothed, the 5-age window
+        # pools 440/4940 ~= 8.9%, giving ~89: clearly pulled back toward
+        # the department's real ~10% pattern at every other age.
+        assert projected_pop > 70.0, (
+            f"Projected (2023) age 19 dept 99 = {projected_pop:.1f}, "
+            "expected smoothing to pull it well above the raw noisy ~42.6"
+        )
 
 
 # -----------------------------------------------------------------------------
