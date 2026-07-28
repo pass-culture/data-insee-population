@@ -106,6 +106,25 @@ WITH census_dept AS (
     FROM population p
     GROUP BY department_code, age, sex
 ),
+-- Same INDCVI single-year-of-age sampling noise as cohort-stable (see
+-- CREATE_PROJECTED_DEPARTMENT_COHORT_STABLE) affects cohort-aging's raw
+-- per-cohort count too, since it's carried forward as-is for that cohort's
+-- whole life. Average (not sum -- this isn't a share, it's a population
+-- count) over a +/-{smoothing_window}-year age window to damp it, except
+-- at the census year itself, where the exact observed value is used (see
+-- test_cohort_aging_forward).
+census_dept_smoothed AS (
+    SELECT
+        department_code,
+        region_code,
+        age,
+        sex,
+        AVG(population) OVER (
+            PARTITION BY department_code, sex ORDER BY age
+            RANGE BETWEEN {smoothing_window} PRECEDING AND {smoothing_window} FOLLOWING
+        ) AS population_smoothed
+    FROM census_dept
+),
 projection_years AS (
     SELECT generate_series AS year
     FROM generate_series({start_year}, {end_year})
@@ -114,15 +133,23 @@ projected AS (
     SELECT
         py.year,
         {month_select} AS month,
-        c.department_code,
-        c.region_code,
-        (c.age + (py.year - {census_year})) AS age,
-        c.sex,
-        CAST(c.population AS DOUBLE){month_factor} AS population
-    FROM census_dept c
+        cs.department_code,
+        cs.region_code,
+        (cs.age + (py.year - {census_year})) AS age,
+        cs.sex,
+        CAST(
+            CASE WHEN py.year = {census_year}
+                THEN c.population
+                ELSE cs.population_smoothed
+            END AS DOUBLE
+        ){month_factor} AS population
+    FROM census_dept_smoothed cs
+    JOIN census_dept c
+        ON c.department_code = cs.department_code
+        AND c.age = cs.age AND c.sex = cs.sex
     CROSS JOIN projection_years py
     {month_join}
-    WHERE (c.age + (py.year - {census_year})) BETWEEN {min_age} AND {max_age}
+    WHERE (cs.age + (py.year - {census_year})) BETWEEN {min_age} AND {max_age}
 )
 SELECT
     year,
@@ -183,16 +210,65 @@ cohort_totals AS (
     FROM census_dept
     GROUP BY age, sex
 ),
-dept_age_sex_shares AS (
+-- INDCVI is a rotating panel, not an exhaustive annual census: at a single
+-- year of age, a mid/small department's sample can be thin enough that its
+-- department share swings +/-15-20% from pure sampling noise, and that noise
+-- would otherwise be frozen into every projection year. Pooling population
+-- (dept and national) over a +/-{smoothing_window}-year age window before
+-- dividing damps that noise while leaving genuine, gradual age trends (e.g.
+-- post-bac migration into university departments) intact. Only the SHARE is
+-- smoothed -- national cohort_totals used for the actual projected amount
+-- stay exact, per age, so national totals are unaffected. census_dept
+-- intentionally keeps ages outside [min_age, max_age] (cohort-stable needs
+-- them to look up the census-age cohort for other projection years, see
+-- _build_where_clause) -- those extra ages also give the smoothing window
+-- real neighbors at the edges of the requested range instead of truncating.
+census_dept_smoothed AS (
     SELECT
-        cd.department_code,
-        cd.region_code,
-        cd.age,
-        cd.sex,
-        cd.population / NULLIF(ct.total_effectif, 0) AS dept_share
-    FROM census_dept cd
+        department_code,
+        region_code,
+        age,
+        sex,
+        SUM(population) OVER (
+            PARTITION BY department_code, sex ORDER BY age
+            RANGE BETWEEN {smoothing_window} PRECEDING AND {smoothing_window} FOLLOWING
+        ) AS population_smoothed
+    FROM census_dept
+),
+cohort_totals_smoothed AS (
+    SELECT
+        age,
+        sex,
+        SUM(total_effectif) OVER (
+            PARTITION BY sex ORDER BY age
+            RANGE BETWEEN {smoothing_window} PRECEDING AND {smoothing_window} FOLLOWING
+        ) AS total_effectif_smoothed
+    FROM cohort_totals
+),
+dept_age_sex_shares AS (
+    -- Keep both the raw (exact) and smoothed share: at Y = census_year we
+    -- already have the true observed value for every department, so we
+    -- reproduce it exactly rather than smoothing away real data (see
+    -- test_cohort_stable_matches_census_at_census_year). The smoothed share
+    -- is only used to extrapolate OTHER years, where we're already trusting
+    -- "the age-A share holds over time" as an assumption -- a lower-variance
+    -- estimate of that share is strictly better there.
+    SELECT
+        cds.department_code,
+        cds.region_code,
+        cds.age,
+        cds.sex,
+        cd.population / NULLIF(ct.total_effectif, 0) AS dept_share_raw,
+        cds.population_smoothed
+            / NULLIF(cts.total_effectif_smoothed, 0) AS dept_share_smoothed
+    FROM census_dept_smoothed cds
+    JOIN cohort_totals_smoothed cts
+        ON cds.age = cts.age AND cds.sex = cts.sex
+    JOIN census_dept cd
+        ON cd.department_code = cds.department_code
+        AND cd.age = cds.age AND cd.sex = cds.sex
     JOIN cohort_totals ct
-        ON cd.age = ct.age AND cd.sex = ct.sex
+        ON ct.age = cds.age AND ct.sex = cds.sex
 ),
 projection_years AS (
     SELECT generate_series AS year
@@ -206,7 +282,10 @@ projected AS (
         ds.region_code,
         ds.age AS age,
         ds.sex,
-        CAST(ct.total_effectif AS DOUBLE){month_factor} * ds.dept_share AS population
+        CAST(ct.total_effectif AS DOUBLE){month_factor}
+            * (CASE WHEN py.year = {census_year}
+                    THEN ds.dept_share_raw
+                    ELSE ds.dept_share_smoothed END) AS population
     FROM projection_years py
     CROSS JOIN dept_age_sex_shares ds
     JOIN cohort_totals ct

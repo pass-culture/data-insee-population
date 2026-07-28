@@ -31,6 +31,7 @@ from passculture.data.insee_population.constants import (
     DEPARTMENTS_DOM,
     DEPARTMENTS_METRO,
     DEPARTMENTS_TOM,
+    DEPT_SHARE_SMOOTHING_WINDOW,
     IRIS_SENTINEL_NO_GEO,
     MAX_AGE,
 )
@@ -100,9 +101,15 @@ class PopulationProcessor:
         correct_student_mobility: bool = True,
         monthly: bool = False,
         method: ProjectionMethod = "cohort-estimates",
+        dept_share_smoothing_window: int = DEPT_SHARE_SMOOTHING_WINDOW,
         cache_dir: str | Path | None = "data/cache",
     ) -> None:
-        """Initialize processor with filtering options."""
+        """Initialize processor with filtering options.
+
+        ``dept_share_smoothing_window``: see ``project_multi_year`` -- damps
+        single-year-of-age INDCVI sampling noise, applies to all three
+        methods. Pass 0 to disable smoothing entirely.
+        """
         self.year = year
         self.min_age = min_age
         self.max_age = max_age
@@ -115,6 +122,7 @@ class PopulationProcessor:
         self.correct_student_mobility = correct_student_mobility
         self.monthly = monthly
         self.method: ProjectionMethod = method
+        self.dept_share_smoothing_window = dept_share_smoothing_window
         self.cache_dir = Path(cache_dir) if cache_dir else None
 
         # For each (projection_year, age) we need the cohort born in
@@ -262,6 +270,7 @@ class PopulationProcessor:
             census_year=self.year,
             monthly=self.monthly,
             method=self.method,
+            dept_share_smoothing_window=self.dept_share_smoothing_window,
         )
 
         return self
