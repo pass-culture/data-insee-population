@@ -20,6 +20,9 @@ from loguru import logger
 from rich.progress import Progress
 
 from passculture.data.insee_population.constants import (
+    COM_CENSUS_YEAR,
+    COM_POP1B_MEMBER,
+    COM_POP1B_URL,
     DEPARTMENT_TO_REGION,
     DEPARTMENTS_COM,
     DEPARTMENTS_DOM,
@@ -39,10 +42,6 @@ from passculture.data.insee_population.constants import (
     NCL_CENSUS_YEAR,
     PYF_CENSUS_URL,
     PYF_CENSUS_YEAR,
-    SPM_CENSUS_YEAR,
-    SPM_CODGEO_PREFIX,
-    SPM_POP1B_MEMBER,
-    SPM_POP1B_URL,
     WLF_CENSUS_URL,
     WLF_CENSUS_YEAR,
 )
@@ -716,32 +715,38 @@ def synthesize_mayotte_population(
 
 
 # -----------------------------------------------------------------------------
-# Saint-Pierre-et-Miquelon (975) 2022 census (POP1B)
+# COM 2022 census (POP1B): Saint-Pierre-et-Miquelon (975),
+#                          Saint-Barthélemy (977), Saint-Martin (978)
 # -----------------------------------------------------------------------------
 
+_COM_NAMES: dict[str, str] = {
+    "975": "Saint-Pierre-et-Miquelon",
+    "977": "Saint-Barthélemy",
+    "978": "Saint-Martin",
+}
 
-def download_spm_pop1b(cache_dir: Path | None = None) -> pd.DataFrame:
-    """Download Saint-Pierre-et-Miquelon 2022 census (POP1B: sex x age).
+
+def download_com_pop1b(cache_dir: Path | None = None) -> pd.DataFrame:
+    """Download the COM 2022 census (POP1B: sex x age) for 975 / 977 / 978.
 
     INSEE ships POP1B for all collectivités d'outre-mer in one zip-bundled
-    workbook; we keep only the 975 communes. Returns a DataFrame with columns
-    ``age, sex, population``, or empty if the file cannot be fetched/parsed.
+    workbook. Returns a DataFrame with columns ``department_code, age, sex,
+    population`` (one age pyramid per COM), or empty if the file cannot be
+    fetched/parsed.
     """
-    cache_path = cache_dir / "spm_pop1b_2022.parquet" if cache_dir else None
+    cache_path = cache_dir / "com_pop1b_2022.parquet" if cache_dir else None
     if cache_path and cache_path.exists():
-        logger.debug("Using cached SPM POP1B: {}", cache_path)
+        logger.debug("Using cached COM POP1B: {}", cache_path)
         return pd.read_parquet(cache_path)
 
     try:
-        logger.info(
-            "Downloading Saint-Pierre-et-Miquelon 2022 POP1B from {}", SPM_POP1B_URL
-        )
-        response = requests.get(SPM_POP1B_URL, timeout=ESTIMATES_TIMEOUT)
+        logger.info("Downloading COM 2022 POP1B from {}", COM_POP1B_URL)
+        response = requests.get(COM_POP1B_URL, timeout=ESTIMATES_TIMEOUT)
         response.raise_for_status()
-        xls_bytes = _extract_zip_member(response.content, SPM_POP1B_MEMBER)
-        df = _parse_pop1b_wide(xls_bytes, codgeo_prefix=SPM_CODGEO_PREFIX)
+        xls_bytes = _extract_zip_member(response.content, COM_POP1B_MEMBER)
+        df = _parse_com_pop1b(xls_bytes)
     except Exception as e:
-        logger.warning("Could not fetch SPM POP1B: {}", e)
+        logger.warning("Could not fetch COM POP1B: {}", e)
         return pd.DataFrame()
 
     if df.empty:
@@ -752,49 +757,90 @@ def download_spm_pop1b(cache_dir: Path | None = None) -> pd.DataFrame:
     return df
 
 
-def synthesize_spm_population(
+def _parse_com_pop1b(xls_bytes: bytes) -> pd.DataFrame:
+    """Split the bundled ``C.O.M.`` POP1B workbook into one pyramid per COM.
+
+    Each territory is the sum of the communes whose CODGEO starts with its
+    department code (975xx, 977xx, 978xx). Territories absent from the file
+    are simply not returned.
+    """
+    parts: list[pd.DataFrame] = []
+    for dept in DEPARTMENTS_COM:
+        pyramid = _parse_pop1b_wide(xls_bytes, codgeo_prefix=dept)
+        if pyramid.empty:
+            logger.warning("  COM POP1B: no communes found for {}", dept)
+            continue
+        parts.append(pyramid.assign(department_code=dept))
+    if not parts:
+        return pd.DataFrame()
+    return pd.concat(parts, ignore_index=True)[
+        ["department_code", "age", "sex", "population"]
+    ]
+
+
+def synthesize_com_population(
     year: int,
     cache_dir: Path | None = None,
+    departments: list[str] | None = None,
 ) -> pd.DataFrame:
-    """Build Saint-Pierre-et-Miquelon (975) population rows for ``year``.
+    """Build COM (975 / 977 / 978) population rows for ``year``.
 
-    Loads the SPM 2022 POP1B census and ages it forward by
-    ``max(0, year - SPM_CENSUS_YEAR)``. SPM is a COM (not in INSEE's France
-    entière estimates), so under ``cohort-estimates`` these rows are kept as-is,
-    not re-anchored.
+    Loads the COM 2022 POP1B census and ages each territory forward by
+    ``max(0, year - COM_CENSUS_YEAR)``. ``departments`` selects which COM to
+    include (default: ``DEPARTMENTS_COM``). COM are not in INSEE's France
+    entière estimates, so under ``cohort-estimates`` these rows are kept as-is,
+    not re-anchored. They belong to no INSEE region: ``region_code`` is the
+    department code itself.
     """
-    logger.info("Adding Saint-Pierre-et-Miquelon (975) for year {}...", year)
+    allowed = set(departments) if departments is not None else set(DEPARTMENTS_COM)
+    logger.info("Adding COM {} for year {}...", sorted(allowed), year)
 
-    pop1b = download_spm_pop1b(cache_dir)
+    pop1b = download_com_pop1b(cache_dir)
     if pop1b.empty:
-        logger.warning("  Could not load SPM POP1B, skipping Saint-Pierre")
+        logger.warning("  Could not load COM POP1B, skipping COM")
         return pd.DataFrame()
 
-    aged = pop1b.copy()
-    aged["age"] = aged["age"] + max(0, year - SPM_CENSUS_YEAR)
-    aged = aged[aged["population"] > 0]
-    if aged.empty:
-        return pd.DataFrame()
+    offset = max(0, year - COM_CENSUS_YEAR)
+    parts: list[pd.DataFrame] = []
+    for dept in DEPARTMENTS_COM:
+        if dept not in allowed:
+            continue
+        aged = pop1b[pop1b["department_code"] == dept].copy()
+        aged["age"] = aged["age"] + offset
+        aged = aged[aged["population"] > 0]
+        if aged.empty:
+            logger.warning(
+                "  {} ({}): no census rows, skipping", dept, _COM_NAMES[dept]
+            )
+            continue
 
-    rows: list[dict] = [
-        {
-            "year": year,
-            "department_code": "975",
-            "region_code": "975",
-            "canton_code": "9750",
-            "commune_code": "",
-            "iris_code": IRIS_SENTINEL_NO_GEO,
-            "age": int(r["age"]),
-            "sex": r["sex"],
-            "population": float(r["population"]),
-        }
-        for _, r in aged.iterrows()
-    ]
-    df = pd.DataFrame(rows)
-    logger.debug(
-        "  Added {} SPM rows ({:,.0f} population)", len(df), df["population"].sum()
-    )
-    return df
+        rows = [
+            {
+                "year": year,
+                "department_code": dept,
+                "region_code": dept,
+                "canton_code": f"{dept}0",
+                "commune_code": "",
+                "iris_code": IRIS_SENTINEL_NO_GEO,
+                "age": int(r["age"]),
+                "sex": r["sex"],
+                "population": float(r["population"]),
+            }
+            for _, r in aged.iterrows()
+        ]
+        part = pd.DataFrame(rows)
+        logger.debug(
+            "  {} ({}) — {} rows, {:,.0f} population",
+            dept,
+            _COM_NAMES[dept],
+            len(part),
+            part["population"].sum(),
+        )
+        parts.append(part)
+
+    if not parts:
+        return pd.DataFrame()
+    return pd.concat(parts, ignore_index=True)
 
 
 # -----------------------------------------------------------------------------

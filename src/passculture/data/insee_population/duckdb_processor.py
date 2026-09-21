@@ -28,6 +28,7 @@ from loguru import logger
 
 from passculture.data.insee_population import sql
 from passculture.data.insee_population.constants import (
+    DEPARTMENTS_COM,
     DEPARTMENTS_DOM,
     DEPARTMENTS_METRO,
     DEPARTMENTS_TOM,
@@ -40,8 +41,8 @@ from passculture.data.insee_population.downloaders import (
     download_insee_estimates,
     download_mnai_birth_distribution,
     download_mobsco,
+    synthesize_com_population,
     synthesize_mayotte_population,
-    synthesize_spm_population,
     synthesize_tom_population,
 )
 from passculture.data.insee_population.geo_mappings import get_geo_mappings
@@ -183,7 +184,7 @@ class PopulationProcessor:
             self._add_tom()
 
         if self.include_com:
-            self._add_spm()
+            self._add_com()
 
         return self
 
@@ -411,13 +412,14 @@ class PopulationProcessor:
         Age filtering is deliberately NOT applied here: cohort-stable needs
         every cohort referenced by any projection year to exist in census,
         including ages below ``min_age``.
+
+        Only DOM can be filtered out of INDCVI: the main file is métropole +
+        4 DOM, so COM / Mayotte / TOM are opt-in via their own synthesis
+        steps rather than filtered here.
         """
-        filters = []
         if not self.include_dom:
-            filters.append("DEPT NOT IN ('971', '972', '973', '974')")
-        if not self.include_com:
-            filters.append("DEPT NOT IN ('975', '977', '978')")
-        return "WHERE " + " AND ".join(filters) if filters else ""
+            return "WHERE DEPT NOT IN ('971', '972', '973', '974')"
+        return ""
 
     def _add_mayotte(self) -> None:
         """Add Mayotte data from POP1B census (raw, aged forward)."""
@@ -439,18 +441,19 @@ class PopulationProcessor:
         self._register_dataframe("tom_df", tom_df)
         self._execute(sql.INSERT_TOM)
 
-    def _add_spm(self) -> None:
-        """Add Saint-Pierre-et-Miquelon (975) from its 2022 POP1B census.
+    def _add_com(self) -> None:
+        """Add COM (975 / 977 / 978) from the 2022 POP1B census (aged forward).
 
-        Best-effort: a missing/unparsable SPM source is logged and skipped
-        rather than failing the run (SPM is ~0.007% of the eligible population).
+        Best-effort: a missing/unparsable COM source is logged and skipped
+        rather than failing the run (the three COM together are ~0.07% of the
+        eligible population).
         """
-        spm_df = synthesize_spm_population(self.year, cache_dir=self.cache_dir)
-        if spm_df.empty:
-            logger.warning("Saint-Pierre-et-Miquelon (975) unavailable — skipping.")
+        com_df = synthesize_com_population(self.year, cache_dir=self.cache_dir)
+        if com_df.empty:
+            logger.warning("COM POP1B (975, 977, 978) unavailable — skipping.")
             return
-        self._register_dataframe("spm_df", spm_df)
-        self._execute(sql.INSERT_SPM)
+        self._register_dataframe("com_df", com_df)
+        self._execute(sql.INSERT_COM)
 
     def _load_geo_mappings(self) -> None:
         """Load commune→EPCI and canton→EPCI weight mappings."""
@@ -485,6 +488,14 @@ class PopulationProcessor:
             )
 
         results["stats"]["mayotte_present"] = "976" in present
+
+        present_com = set(DEPARTMENTS_COM) & present
+        missing_com = set(DEPARTMENTS_COM) - present
+        results["stats"]["com_present"] = sorted(present_com)
+        if missing_com:
+            results["warnings"].append(
+                f"Missing COM departments: {sorted(missing_com)}"
+            )
 
         present_tom = set(DEPARTMENTS_TOM) & present
         missing_tom = set(DEPARTMENTS_TOM) - present

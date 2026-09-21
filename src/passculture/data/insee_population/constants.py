@@ -71,16 +71,17 @@ MAYOTTE_POP1B_URL = (
 )
 MAYOTTE_POP1B_MEMBER = "BTX_TD_POP1B_2017.xls"
 
-# Saint-Pierre-et-Miquelon 2022 census (POP1B). COM, eligible for pass Culture
-# but not in INDCVI. Page 8581812. INSEE ships POP1B for all collectivités in a
-# single "C.O.M." workbook (one row per commune); we keep only the 975 communes
-# (97501 Miquelon-Langlade, 97502 Saint-Pierre). Same wide layout as Mayotte.
-SPM_CENSUS_YEAR = 2022
-SPM_POP1B_URL = (
+# COM 2022 census (POP1B): Saint-Pierre-et-Miquelon (975), Saint-Barthélemy
+# (977), Saint-Martin (978). Eligible for pass Culture but not in the main
+# INDCVI file. Page 8581812. INSEE ships POP1B for all three in a single
+# "C.O.M." workbook (one row per commune: 97501, 97502, 97701, 97801); each
+# territory is summed from the communes whose CODGEO starts with its code.
+# Same wide layout as Mayotte.
+COM_CENSUS_YEAR = 2022
+COM_POP1B_URL = (
     "https://www.insee.fr/fr/statistiques/fichier/8581812/TD_POP1B_2022_COM_xlsx.zip"
 )
-SPM_POP1B_MEMBER = "TD_POP1B_2022_COM.xlsx"
-SPM_CODGEO_PREFIX = "975"
+COM_POP1B_MEMBER = "TD_POP1B_2022_COM.xlsx"
 
 # MOBSCO (Mobilités Scolaires) — student commuting flows
 # Contains residence commune (COMMUNE) and study commune (DCETUF)
@@ -141,13 +142,13 @@ DEPARTMENTS_DOM = [
 ]  # Guadeloupe, Martinique, Guyane, Réunion
 # 976 (Mayotte) has separate census - not in standard INDCVI files
 DEPARTMENTS_MAYOTTE = ["976"]
+# COM (not in INDCVI): sourced from the POP1B 2022 "C.O.M." workbook, see
+# COM_POP1B_URL. All three are eligible for pass Culture residency.
 DEPARTMENTS_COM = ["975", "977", "978"]  # Saint-Pierre, Saint-Barth, Saint-Martin
 # TOM Pacifique eligible for pass Culture residency: Wallis-et-Futuna (986) and
 # Nouvelle-Calédonie (988). Polynésie française (987) is NOT in the pass Culture
 # residency list, so it is excluded from the default territory set (its parser
 # in downloaders.py is kept for reference but not synthesized by default).
-# Saint-Pierre-et-Miquelon (975) is also eligible but has no machine-readable
-# census source wired yet (~60 people per single-year cohort — a known gap).
 DEPARTMENTS_TOM = ["986", "988"]  # Wallis-Futuna, Nouvelle-Calédonie
 
 # Wallis-et-Futuna 2023 census (STSEE) — population by sex and 5-year age band

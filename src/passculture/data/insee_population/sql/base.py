@@ -2,8 +2,8 @@
 
 __all__ = [
     "CREATE_BASE_TABLE",
+    "INSERT_COM",
     "INSERT_MAYOTTE",
-    "INSERT_SPM",
     "INSERT_TOM",
     "REGISTER_CANTON_WEIGHTS",
     "REGISTER_COMMUNE_EPCI",
@@ -54,7 +54,7 @@ REGISTER_CANTON_WEIGHTS = (
 
 INSERT_MAYOTTE = "INSERT INTO population SELECT * FROM mayotte_df"
 INSERT_TOM = "INSERT INTO population SELECT * FROM tom_df"
-INSERT_SPM = "INSERT INTO population SELECT * FROM spm_df"
+INSERT_COM = "INSERT INTO population SELECT * FROM com_df"
 
 REGISTER_MONTHLY_BIRTHS = (
     "CREATE OR REPLACE TABLE monthly_births AS SELECT * FROM monthly_births_df"
