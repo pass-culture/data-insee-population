@@ -27,8 +27,9 @@ pop(year, month, age, sex, geo) =
   / `cohort-aging` instead freeze this at the 2022 INDCVI count.
 - **[A']** comes from the 2022 INDCVI census: which department, which
   exact age in the band, which sex. Mayotte is stitched in from its 2017
-  POP1B census; eligible TOM (Wallis 986, Nouvelle-Calédonie 988) from
-  their own censuses.
+  POP1B census; the COM (975, 977, 978) from the POP1B 2022 `C.O.M.`
+  workbook; eligible TOM (Wallis 986, Nouvelle-Calédonie 988) from their
+  own censuses.
 - **[B]** comes from MNAI in INDREG — month of birth of the living
   population. Regional fallback for departments < 700 k population.
 - **[C]** comes from INDCVI shares within each department, with a

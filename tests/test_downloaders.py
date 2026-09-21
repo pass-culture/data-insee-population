@@ -213,7 +213,7 @@ def test_synthesize_tom_defaults_to_eligible_only(monkeypatch):
 
 
 def _make_pop1b_com_bytes():
-    """Minimal POP1B 'C.O.M.' workbook: 2 SPM communes + 1 other COM commune."""
+    """Minimal POP1B 'C.O.M.' workbook: 2 SPM communes + St-Barth + St-Martin."""
     import io
 
     import openpyxl
@@ -237,6 +237,7 @@ def _make_pop1b_com_bytes():
         ["97501", "Miquelon-Langlade", 5, 6, 4, 7],  # SPM
         ["97502", "Saint-Pierre", 20, 25, 18, 22],  # SPM
         ["97701", "Saint-Barthélemy", 100, 110, 95, 105],  # NOT 975
+        ["97801", "Saint-Martin", 300, 310, 290, 305],  # NOT 975
     ]
     for row in grid:
         ws.append(row)
@@ -252,22 +253,48 @@ def test_parse_pop1b_wide_filters_by_codgeo_prefix():
     # age 15 male = 5 + 20 = 25 (St-Barth 100 excluded)
     m15 = spm[(spm.age == 15) & (spm.sex == "male")].population.iloc[0]
     assert m15 == 25
-    # no prefix sums every commune (St-Barth included): 5 + 20 + 100 = 125
+    # no prefix sums every commune: 5 + 20 + 100 + 300 = 425
     allc = downloaders._parse_pop1b_wide(raw_bytes, codgeo_prefix=None)
-    assert allc[(allc.age == 15) & (allc.sex == "male")].population.iloc[0] == 125
+    assert allc[(allc.age == 15) & (allc.sex == "male")].population.iloc[0] == 425
 
 
-def test_synthesize_spm_ages_forward(monkeypatch):
+def test_parse_com_pop1b_splits_by_department():
+    df = downloaders._parse_com_pop1b(_make_pop1b_com_bytes())
+    assert set(df.department_code.unique()) == {"975", "977", "978"}
+    m15 = df[(df.age == 15) & (df.sex == "male")].set_index("department_code")
+    assert m15.loc["975", "population"] == 25  # 5 + 20
+    assert m15.loc["977", "population"] == 100
+    assert m15.loc["978", "population"] == 300
+
+
+def _fake_com_pop1b(cache_dir=None):
     import pandas as pd
 
-    monkeypatch.setattr(
-        downloaders,
-        "download_spm_pop1b",
-        lambda cache_dir=None: pd.DataFrame(
-            {"age": [15, 16], "sex": ["male", "female"], "population": [10.0, 12.0]}
-        ),
+    return pd.DataFrame(
+        {
+            "department_code": ["975", "975", "977", "978"],
+            "age": [15, 16, 15, 15],
+            "sex": ["male", "female", "male", "male"],
+            "population": [10.0, 12.0, 100.0, 300.0],
+        }
     )
-    # SPM census year is 2022; project to 2024 -> ages shift +2
-    df = downloaders.synthesize_spm_population(2024, cache_dir=None)
-    assert set(df.department_code.unique()) == {"975"}
-    assert sorted(df.age.unique()) == [17, 18]
+
+
+def test_synthesize_com_ages_forward(monkeypatch):
+    monkeypatch.setattr(downloaders, "download_com_pop1b", _fake_com_pop1b)
+    # COM census year is 2022; project to 2024 -> ages shift +2
+    df = downloaders.synthesize_com_population(2024, cache_dir=None)
+    assert set(df.department_code.unique()) == {"975", "977", "978"}
+    assert sorted(df[df.department_code == "975"].age.unique()) == [17, 18]
+    assert df[df.department_code == "978"].population.sum() == 300.0
+    # COM are not part of any INSEE region: region_code = department_code
+    assert (df.region_code == df.department_code).all()
+
+
+def test_synthesize_com_honours_departments_filter(monkeypatch):
+    monkeypatch.setattr(downloaders, "download_com_pop1b", _fake_com_pop1b)
+    df = downloaders.synthesize_com_population(
+        2022, cache_dir=None, departments=["978"]
+    )
+    assert set(df.department_code.unique()) == {"978"}
+    assert sorted(df.age.unique()) == [15]  # no aging at census year
