@@ -311,6 +311,21 @@ class TestDepartmentCoverage:
         )
         assert processor.include_mayotte is True
 
+    def test_missing_tom_territory_fails(self, processor, monkeypatch):
+        """A single missing eligible TOM (e.g. 988) must fail, not warn."""
+        from passculture.data.insee_population import duckdb_processor
+
+        wallis_only = pd.DataFrame(
+            {"department_code": ["986"], "age": [18], "population": [100.0]}
+        )
+        monkeypatch.setattr(
+            duckdb_processor,
+            "synthesize_tom_population",
+            lambda year, cache_dir=None: wallis_only,
+        )
+        with pytest.raises(RuntimeError, match="988"):
+            processor._add_tom()
+
 
 # -----------------------------------------------------------------------------
 # Test: Multi-Year Projection Mode
