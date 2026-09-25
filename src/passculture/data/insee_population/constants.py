@@ -159,9 +159,13 @@ WLF_CENSUS_URL = (
 )
 
 # Nouvelle-Calédonie 2019 census (ISEE) — population by sex and 5-year age band
+# ("Population, logements et ménages par province", sheet P02). Listed on
+# https://isee.nc/recensement; the former phocadownload link now redirects to
+# that HTML page.
 NCL_CENSUS_YEAR = 2019
 NCL_CENSUS_URL = (
-    "https://www.isee.nc/component/phocadownload/category/193-recensement?download=1980"
+    "https://isee.nc/sites/default/files/2025-10/"
+    "rp2019-pop-logement-menages-provinces.xls"
 )
 
 # Polynésie française demographics 1983-2019 (ISPF via data.gouv.fr) — individual ages

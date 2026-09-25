@@ -432,11 +432,19 @@ class PopulationProcessor:
         self._execute(sql.INSERT_MAYOTTE)
 
     def _add_tom(self) -> None:
-        """Add TOM Pacifique data from territory censuses (aged forward)."""
+        """Add TOM Pacifique data from territory censuses (aged forward).
+
+        Strict: every eligible TOM (``DEPARTMENTS_TOM``) must be present, so a
+        broken source URL fails the run instead of silently dropping a
+        territory from the export.
+        """
         tom_df = synthesize_tom_population(self.year, cache_dir=self.cache_dir)
-        if tom_df.empty:
+        present = set(tom_df["department_code"]) if not tom_df.empty else set()
+        missing = sorted(set(DEPARTMENTS_TOM) - present)
+        if missing:
             raise RuntimeError(
-                "All TOM Pacifique censuses unavailable — use --no-tom to skip."
+                f"TOM Pacifique census unavailable for {missing} — "
+                "fix the source URL or use --no-tom to skip."
             )
         self._register_dataframe("tom_df", tom_df)
         self._execute(sql.INSERT_TOM)
