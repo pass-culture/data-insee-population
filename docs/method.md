@@ -55,7 +55,9 @@ Each row carries `population`, `confidence_pct`, `population_low`,
      row per commune; each COM is summed from its own communes). They
      belong to no INSEE region, so `region_code` is the COM code itself.
    - **Wallis-et-Futuna (986)** from RP2023, **Nouvelle-Calédonie
-     (988)** from RP2019. When a territory's census is newer than the
+     (988)** from RP2019 — **Province Sud only** (pass Culture is not
+     open in Province Nord / Îles Loyauté), single-year ages from the
+     exhaustive individual records on Open Data NC. When a territory's census is newer than the
      base year the aging offset is floored at 0 (used as-is).
    - **Polynésie française (987)** is *not* in the pass-Culture
      residency list and is excluded by default (its parser is kept but

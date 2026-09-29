@@ -76,7 +76,7 @@ def population(
         "--include-tom/--no-tom",
         help=(
             "Include pass-Culture-eligible TOM (986, 988): "
-            "Wallis-Futuna, Nouvelle-Calédonie (Polynésie 987 excluded)"
+            "Wallis-Futuna, Nouvelle-Calédonie Province Sud (Polynésie 987 excluded)"
         ),
     ),
     correct_student_mobility: bool = typer.Option(
@@ -234,7 +234,7 @@ def population(
     if include_tom:
         console.print(
             "[dim]+ Including eligible TOM: Wallis-Futuna (986), "
-            "Nouvelle-Calédonie (988)[/dim]"
+            "Nouvelle-Calédonie Province Sud (988)[/dim]"
         )
 
     try:

@@ -146,7 +146,8 @@ DEPARTMENTS_MAYOTTE = ["976"]
 # COM_POP1B_URL. All three are eligible for pass Culture residency.
 DEPARTMENTS_COM = ["975", "977", "978"]  # Saint-Pierre, Saint-Barth, Saint-Martin
 # TOM Pacifique eligible for pass Culture residency: Wallis-et-Futuna (986) and
-# Nouvelle-Calédonie (988). Polynésie française (987) is NOT in the pass Culture
+# Nouvelle-Calédonie (988) — Province Sud only, see NCL_PROVINCE.
+# Polynésie française (987) is NOT in the pass Culture
 # residency list, so it is excluded from the default territory set (its parser
 # in downloaders.py is kept for reference but not synthesized by default).
 DEPARTMENTS_TOM = ["986", "988"]  # Wallis-Futuna, Nouvelle-Calédonie
@@ -158,14 +159,15 @@ WLF_CENSUS_URL = (
     "principaux_tableaux_population_rp2023.xlsx"
 )
 
-# Nouvelle-Calédonie 2019 census (ISEE) — population by sex and 5-year age band
-# ("Population, logements et ménages par province", sheet P02). Listed on
-# https://isee.nc/recensement; the former phocadownload link now redirects to
-# that HTML page.
+# Nouvelle-Calédonie 2019 census (ISEE, exhaustive individual records on Open
+# Data NC). pass Culture is only open in Province Sud, so 988 is restricted to
+# NCL_PROVINCE (~75% of NC; ~75.5% of 15-17 year olds). Aggregated server-side
+# by single-year age (AGER, âge révolu) and sex (GENRE 1=male, 2=female).
 NCL_CENSUS_YEAR = 2019
+NCL_PROVINCE = "Sud"
 NCL_CENSUS_URL = (
-    "https://isee.nc/sites/default/files/2025-10/"
-    "rp2019-pop-logement-menages-provinces.xls"
+    "https://data.gouv.nc/api/explore/v2.1/catalog/datasets/"
+    "recensement-de-la-population-2019-individus-nc/exports/json"
 )
 
 # Polynésie française demographics 1983-2019 (ISPF via data.gouv.fr) — individual ages
