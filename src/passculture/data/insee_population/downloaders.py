@@ -40,6 +40,7 @@ from passculture.data.insee_population.constants import (
     MOBSCO_URL,
     NCL_CENSUS_URL,
     NCL_CENSUS_YEAR,
+    NCL_PROVINCE,
     PYF_CENSUS_URL,
     PYF_CENSUS_YEAR,
     WLF_CENSUS_URL,
@@ -848,8 +849,7 @@ def synthesize_com_population(
 #                Nouvelle-Calédonie (988)
 # -----------------------------------------------------------------------------
 
-# French 5-year age band labels → band start age.
-# Used by both WLF and NCL parsers.
+# French 5-year age band labels → band start age (WLF parser).
 _QUINQUENNAL_LABELS: dict[str, int] = {
     "0 à 4 ans": 0,
     "5 à 9 ans": 5,
@@ -959,20 +959,37 @@ def _parse_wlf_xlsx(xlsx_bytes: bytes) -> pd.DataFrame:
 
 
 def download_ncl_census(cache_dir: Path | None = None) -> pd.DataFrame:
-    """Download Nouvelle-Calédonie 2019 census (ISEE XLS).
+    """Download Nouvelle-Calédonie 2019 census, Province Sud only (Open Data NC).
 
-    Parses sheet "P02": 5-year age bands x sex, total-NC columns
-    (Hommes=10, Femmes=11). Returns DataFrame with age, sex, population.
+    Queries the exhaustive RP2019 individual records aggregated by single-year
+    age and sex, filtered to ``NCL_PROVINCE`` (pass Culture is only open in
+    Province Sud). Returns DataFrame with age, sex, population.
     """
-    cache_path = cache_dir / "ncl_census_2019.parquet" if cache_dir else None
+    cache_path = (
+        cache_dir / f"ncl_census_{NCL_CENSUS_YEAR}_{NCL_PROVINCE.lower()}.parquet"
+        if cache_dir
+        else None
+    )
     if cache_path and cache_path.exists():
         return pd.read_parquet(cache_path)
 
     try:
-        logger.info("Downloading Nouvelle-Calédonie 2019 census from ISEE...")
-        response = requests.get(NCL_CENSUS_URL, timeout=ESTIMATES_TIMEOUT)
+        logger.info(
+            "Downloading Nouvelle-Calédonie {} census (Province {}) from Open Data NC",
+            NCL_CENSUS_YEAR,
+            NCL_PROVINCE,
+        )
+        response = requests.get(
+            NCL_CENSUS_URL,
+            params={
+                "select": "ager, genre, count(*) as n",
+                "where": f"prov='{NCL_PROVINCE}'",
+                "group_by": "ager, genre",
+            },
+            timeout=ESTIMATES_TIMEOUT,
+        )
         response.raise_for_status()
-        df = _parse_ncl_xls(response.content)
+        df = _parse_ncl_records(response.json())
     except Exception as e:
         logger.warning("Could not fetch NCL census: {}", e)
         return pd.DataFrame()
@@ -985,30 +1002,26 @@ def download_ncl_census(cache_dir: Path | None = None) -> pd.DataFrame:
     return df
 
 
-def _parse_ncl_xls(xls_bytes: bytes) -> pd.DataFrame:
-    """Parse ISEE Nouvelle-Calédonie 2019 XLS population table.
+def _parse_ncl_records(records: list[dict]) -> pd.DataFrame:
+    """Parse Open Data NC grouped records ``{ager, genre, n}``.
 
-    Sheet "P02" layout:
-      row 2: province headers; col 10 = "Nouvelle-Calédonie" (merged)
-      row 3: Hommes / Femmes / Total per province
-      rows 4-20: age bands "0 à 4 ans" … "80 ans et +"
-      col 10 = Hommes total NC, col 11 = Femmes total NC
+    GENRE 1 = male, 2 = female. AGER is age in completed years (âge révolu).
     """
-    raw = pd.read_excel(io.BytesIO(xls_bytes), sheet_name="P02", header=None)
-    bands: list[tuple[int, float, float]] = []
-    open_end_start = 80
-    for _, row in raw.iterrows():
-        label = str(row.iloc[0]).strip() if not pd.isna(row.iloc[0]) else ""
-        start = _QUINQUENNAL_LABELS.get(label)
-        if start is None:
-            continue
-        male = _safe_float(row.iloc[10])
-        female = _safe_float(row.iloc[11])
-        if label == "80 ans et +":
-            open_end_start = 80
-        bands.append((start, male, female))
-
-    return _expand_quinquennal_to_ages(bands, open_end_start)
+    df = pd.DataFrame(records, columns=["ager", "genre", "n"])
+    df["age"] = pd.to_numeric(df["ager"], errors="coerce")
+    df["sex"] = df["genre"].astype(str).map({"1": "male", "2": "female"})
+    df["population"] = pd.to_numeric(df["n"], errors="coerce")
+    df = df.dropna(subset=["age", "sex", "population"])
+    df = df[df["population"] > 0]
+    return (
+        df[["age", "sex", "population"]]
+        .assign(
+            age=lambda d: d["age"].astype(int),
+            population=lambda d: d["population"].astype(float),
+        )
+        .sort_values(["age", "sex"])
+        .reset_index(drop=True)
+    )
 
 
 def download_pyf_census(cache_dir: Path | None = None) -> pd.DataFrame:
@@ -1086,7 +1099,8 @@ def synthesize_tom_population(
     Downloads each eligible territory's census and ages the population to
     ``year`` by shifting individual ages. ``departments`` selects which TOM to
     include (default: ``DEPARTMENTS_TOM`` — the pass-Culture-eligible set, i.e.
-    Wallis-Futuna 986 + Nouvelle-Calédonie 988; Polynésie 987 is excluded).
+    Wallis-Futuna 986 + Nouvelle-Calédonie 988 (Province Sud only); Polynésie
+    987 is excluded).
     Returns an empty DataFrame if all selected sources fail.
 
     When a territory's census is *newer* than ``year`` (e.g. Wallis 2023 vs a
@@ -1099,7 +1113,12 @@ def synthesize_tom_population(
     sources: list[tuple[str, str, int, object]] = [
         ("986", "Wallis-Futuna", WLF_CENSUS_YEAR, download_wlf_census),
         ("987", "Polynésie française", PYF_CENSUS_YEAR, download_pyf_census),
-        ("988", "Nouvelle-Calédonie", NCL_CENSUS_YEAR, download_ncl_census),
+        (
+            "988",
+            "Nouvelle-Calédonie (Province Sud)",
+            NCL_CENSUS_YEAR,
+            download_ncl_census,
+        ),
     ]
 
     parts: list[pd.DataFrame] = []

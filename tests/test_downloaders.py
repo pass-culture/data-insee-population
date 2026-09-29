@@ -212,6 +212,19 @@ def test_synthesize_tom_defaults_to_eligible_only(monkeypatch):
     assert "986" in calls  # Wallis NOT skipped despite 2023 census
 
 
+def test_parse_ncl_records_maps_sex_and_age():
+    records = [
+        {"ager": 17, "genre": "1", "n": 1600},
+        {"ager": 17, "genre": "2", "n": 1587},
+        {"ager": None, "genre": "1", "n": 3},
+    ]
+    df = downloaders._parse_ncl_records(records)
+    assert list(df.columns) == ["age", "sex", "population"]
+    assert len(df) == 2
+    assert set(df.sex) == {"male", "female"}
+    assert df.population.sum() == 3187.0
+
+
 def _make_pop1b_com_bytes():
     """Minimal POP1B 'C.O.M.' workbook: 2 SPM communes + St-Barth + St-Martin."""
     import io
