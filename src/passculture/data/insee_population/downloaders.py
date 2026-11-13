@@ -10,7 +10,9 @@ Handles HTTP downloads and Excel parsing for:
 from __future__ import annotations
 
 import io
+import random
 import tempfile
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -62,7 +64,9 @@ _VALID_DEPARTMENTS = (
 DOWNLOAD_TIMEOUT = 600  # 10 minutes for large census files
 ESTIMATES_TIMEOUT = 120  # 2 minutes for smaller files
 CHUNK_SIZE = 131072  # 128KB chunks
-DOWNLOAD_RETRIES = 3  # retries for truncated/dropped large downloads
+DOWNLOAD_RETRIES = 5  # retries for truncated/dropped large downloads
+DOWNLOAD_BACKOFF_BASE = 3.0  # seconds; exponential backoff between retries
+DOWNLOAD_BACKOFF_CAP = 60.0  # max seconds to wait between retries
 
 # Parquet files start and end with this 4-byte magic; used to detect the
 # silently truncated downloads INSEE's chunked/gzip transfer can produce.
@@ -626,6 +630,17 @@ def _download_file(
                 url,
                 e,
             )
+            # INSEE endpoints intermittently return 5xx/timeouts on large
+            # files. Back off exponentially (with jitter) before retrying so
+            # the attempts don't all hit the same transient outage window.
+            if attempt < retries:
+                backoff = min(
+                    DOWNLOAD_BACKOFF_BASE * (2 ** (attempt - 1)),
+                    DOWNLOAD_BACKOFF_CAP,
+                )
+                delay = backoff + random.uniform(0, DOWNLOAD_BACKOFF_BASE)
+                logger.info("Retrying in {:.1f}s...", delay)
+                time.sleep(delay)
 
     raise OSError(f"Failed to download {url} after {retries} attempts") from last_error
 
