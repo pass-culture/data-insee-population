@@ -390,11 +390,17 @@ class PopulationProcessor:
         return self.conn.execute(query)
 
     def _fetchone(self, query: str) -> Any:
-        """Execute query and return first value."""
-        return self.conn.execute(query).fetchone()[0]
+        """Execute query and return first value.
+        """
+        return self.conn.execute(query).fetchall()[0][0]
 
     def _register_dataframe(self, name: str, df: pd.DataFrame) -> None:
-        """Register DataFrame as DuckDB table."""
+        """Register DataFrame as a DuckDB view.
+        """
+        try:
+            self.conn.fetchall()
+        except duckdb.Error:
+            pass
         self.conn.register(name, df)
 
     def _row_count(self) -> int:
